@@ -3836,8 +3836,6 @@ def _sync_decision_cross_ranks(
     joint_graph: torch.fx.Graph, saved_values: list[torch.fx.Node]
 ) -> list[torch.fx.Node]:
     # use the same policy across different GPUs
-    from torch._subclasses.fake_tensor import unset_fake_temporarily
-
     def has_collectives(joint_graph: torch.fx.Graph) -> bool:
         for node in joint_graph.nodes:
             if isinstance(
@@ -3875,7 +3873,7 @@ def _sync_decision_cross_ranks(
         )
         inputs = hashlib.sha256(node_str.encode("utf-8")).hexdigest()
         all_inputs = [None for _ in range(torch.distributed.get_world_size())]
-        with no_dispatch(), unset_fake_temporarily():
+        with no_dispatch():
             # TODO: maybe use a different process group?
             torch.distributed.all_gather_object(all_inputs, inputs)
             for rank, x in enumerate(all_inputs):
@@ -3888,7 +3886,7 @@ def _sync_decision_cross_ranks(
         return True
 
     if has_same_nodes(joint_graph):
-        with no_dispatch(), unset_fake_temporarily():
+        with no_dispatch():
             # Communicate saved values using canonical names so that
             # node names (which may differ across ranks) don't matter.
             objects = [[canonical[x] for x in saved_values]]
