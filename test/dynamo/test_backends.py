@@ -344,26 +344,29 @@ class TestCustomBackendAPI(torch._dynamo.test_case.TestCase):
             return x + 1
 
         # In the default config (compiled_autograd off) the hook fires exactly
-        # once, at backend resolution. The compiled_autograd re-fire case is
-        # covered by test_dynamo_backend_init_compiled_autograd_refires.
+        # once, at backend resolution. The compiled_autograd path also fires it
+        # once (not per invocation); see test_dynamo_backend_init_compiled_autograd.
         fn(torch.randn(3))
         self.assertEqual(len(calls), 1)
 
-    @parametrize("compile_api", [torch.compile, torch._dynamo.optimize])
+    @parametrize(
+        "compile_api",
+        [torch.compile, torch._dynamo.optimize],
+        name_fn=lambda api: api.__name__,
+    )
     def test_dynamo_backend_init_classmethod(self, compile_api):
-        # When _dynamo_backend_init is a method (not an instance attribute),
-        # get_compiler_fn() wraps the backend in WrapBackendDebug and
-        # torch.compile() wraps it in _TorchCompileWrapper. Both forward the
-        # hook via getattr (reading the MRO); functools.wraps alone would drop
-        # a class-level attribute. Regression test for that forwarding on both
-        # entry points.
+        # A class-level hook (here a @classmethod, read via the MRO rather than
+        # the instance __dict__) must survive both wrappers: torch.compile()'s
+        # _TorchCompileWrapper and get_compiler_fn()'s WrapBackendDebug. Both
+        # forward it with getattr; functools.wraps alone would drop it.
         calls = []
 
         class MyBackend:
             def __call__(self, gm, example_inputs):
                 return gm.forward
 
-            def _dynamo_backend_init(self):
+            @classmethod
+            def _dynamo_backend_init(cls):
                 calls.append(1)
 
         @compile_api(backend=MyBackend())
@@ -375,6 +378,8 @@ class TestCustomBackendAPI(torch._dynamo.test_case.TestCase):
 
     def test_dynamo_backend_init_registered(self):
         # A string backend resolved through the registry must also fire the hook.
+        from torch._dynamo.backends import registry as backend_registry
+
         calls = []
 
         def my_backend(gm, example_inputs):
@@ -384,21 +389,22 @@ class TestCustomBackendAPI(torch._dynamo.test_case.TestCase):
             calls.append(1)
 
         my_backend._dynamo_backend_init = my_backend_init
-        name = "init_test_backend_191921"
+        name = "init_test_backend_192345"
         torch._dynamo.register_backend(my_backend, name)
-        try:
-            @torch.compile(backend=name)
-            def fn(x):
-                return x + 1
 
-            fn(torch.randn(3))
-            self.assertEqual(len(calls), 1)
-        finally:
-            from torch._dynamo.backends import registry as backend_registry
-
+        def cleanup_backend():
             backend_registry._COMPILER_FNS.pop(name, None)
             backend_registry._BACKENDS.pop(name, None)
             backend_registry._BACKEND_TAGS.pop(name, None)
+
+        self.addCleanup(cleanup_backend)
+
+        @torch.compile(backend=name)
+        def fn(x):
+            return x + 1
+
+        fn(torch.randn(3))
+        self.assertEqual(len(calls), 1)
 
     def test_dynamo_backend_init_fires_per_compile_site(self):
         # _dynamo_backend_init fires once per torch.compile() call. Reusing the
@@ -425,6 +431,58 @@ class TestCustomBackendAPI(torch._dynamo.test_case.TestCase):
         fn1(torch.randn(3))
         fn2(torch.randn(3))
         self.assertEqual(len(calls), 2)
+
+    def test_dynamo_backend_init_compiled_autograd(self):
+        # With config.compiled_autograd=True the rebuild path re-enters
+        # _optimize on every invocation of the compiled function, so the hook
+        # would otherwise re-fire per forward call. The OptimizeContext (and its
+        # enter_exit_hooks) must be built under the compiled_autograd config, so
+        # torch.compile runs inside the patch. The hook still fires once.
+        calls = []
+
+        def my_backend(gm, example_inputs):
+            return gm.forward
+
+        def my_backend_init():
+            calls.append(1)
+
+        my_backend._dynamo_backend_init = my_backend_init
+
+        def fn(x):
+            return x + 1
+
+        x = torch.randn(3)
+        with torch._dynamo.config.patch(compiled_autograd=True):
+            opt_fn = torch.compile(fn, backend=my_backend)
+            opt_fn(x)
+            opt_fn(x)
+        self.assertEqual(len(calls), 1)
+
+    def test_dynamo_backend_init_aot_autograd(self):
+        # _dynamo_backend_init set on the fw_compiler must survive the
+        # aot_autograd(fw_compiler=...) wrapper that most out-of-tree backends
+        # are built with. AotAutograd forwards the attribute to its own
+        # instance so the hook fires once at backend resolution.
+        from functorch.compile import make_boxed_func
+        from torch._dynamo.backends.common import aot_autograd
+
+        calls = []
+
+        def my_compiler(gm, example_inputs):
+            return make_boxed_func(gm.forward)
+
+        def my_backend_init():
+            calls.append(1)
+
+        my_compiler._dynamo_backend_init = my_backend_init
+        my_backend = aot_autograd(fw_compiler=my_compiler)
+
+        def f(x):
+            return torch.relu(x)
+
+        opt_f = torch.compile(f, backend=my_backend)
+        opt_f(torch.randn(3, 3))
+        self.assertEqual(len(calls), 1)
 
     def test_aot_autograd_api(self):
         from functorch.compile import make_boxed_func

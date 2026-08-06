@@ -2984,10 +2984,11 @@ class _TorchCompileWrapper:
         self.dynamic = dynamic
         self.compiler_fn = lookup_backend(backend)
         # Forward the eager-init hook so torch.compile() (which wraps backends
-        # here) can trigger it, matching the _dynamo.optimize entry point.
-        self._dynamo_backend_init = getattr(
-            self.compiler_fn, "_dynamo_backend_init", None
-        )
+        # here) can trigger it, matching the _dynamo.optimize entry point. Use
+        # the same hasattr-guarded idiom as WrapBackendDebug so the protocol's
+        # presence check is consistent across both wrappers.
+        if hasattr(self.compiler_fn, "_dynamo_backend_init"):
+            self._dynamo_backend_init = self.compiler_fn._dynamo_backend_init
         self.kwargs: dict[str, _Any] = {}
         # only pass the args if they non-empty
         if mode and mode != "default":

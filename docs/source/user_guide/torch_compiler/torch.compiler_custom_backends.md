@@ -118,6 +118,43 @@ my_backend = aot_autograd(fw_compiler=my_compiler)  # bw_compiler=my_compiler
 model_opt = torch.compile(model, backend=my_backend)
 ```
 
+## Eager Backend Initialization
+
+Backends that need to run one-time eager setup at ``torch.compile()`` time
+(e.g. loading native libraries or initializing device contexts) can define a
+``_dynamo_backend_init`` attribute --- a no-arg callable that fires once the
+backend is resolved, before any invocation.
+
+```python
+def my_backend(gm, example_inputs):
+    return gm.forward
+
+def my_backend_init():
+    load_native_libs()      # runs at compile() time, before any invocation
+
+my_backend._dynamo_backend_init = my_backend_init
+
+@torch.compile(backend=my_backend)
+def fn(x):
+    return x + 1
+```
+
+The hook survives the standard wrapper stack (``torch.compile``'s internal
+wrapper, ``WrapBackendDebug``, and ``aot_autograd``). It works whether the
+backend is passed directly or registered by name with ``register_backend``.
+When using ``aot_autograd(fw_compiler=...)``, set the hook on the inner
+``fw_compiler`` --- ``AotAutograd`` forwards it.
+
+The hook supports instance attributes and class methods (the wrappers read
+it with ``hasattr``, so class-level hooks defined via the MRO work).
+
+The hook is called **once per** ``torch.compile()`` site, on both the
+normal and ``fullgraph=True`` paths. Backends reused across multiple
+compiled functions should therefore be **idempotent**. The hook is
+**not** called when a backend is forced via
+``torch.compiler.set_stance(force_backend=...)``, which bypasses the
+normal resolution path.
+
 ## Examples
 
 ### Debugging Backend

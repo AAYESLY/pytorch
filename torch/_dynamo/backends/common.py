@@ -75,6 +75,12 @@ class AotAutograd:
     def __init__(self, **kwargs: Unpack[AotAutogradKwargs]) -> None:
         self.__name__ = "compiler_fn"
         self.kwargs: AotAutogradKwargs = kwargs
+        # Forward the eager-init hook from fw_compiler so _dynamo_backend_init
+        # set on the inner compiler survives the aot_autograd(...) wrapper that
+        # most out-of-tree backends are built with.
+        fw_init = getattr(kwargs["fw_compiler"], "_dynamo_backend_init", None)
+        if fw_init is not None:
+            self._dynamo_backend_init = fw_init
 
     def __call__(
         self, gm: torch.fx.GraphModule, example_inputs: Sequence[Any], **kwargs: Any

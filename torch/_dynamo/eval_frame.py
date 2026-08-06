@@ -1773,6 +1773,11 @@ def check_for_incompatible_configs() -> None:
 
 
 def optimize(*args: Any, **kwargs: Any) -> OptimizeContext | _NullDecorator:
+    # Eager backend init is a once-per-compile-site contract. The compiled
+    # autograd path re-enters optimize() via rebuild_ctx on every invocation of
+    # the compiled function, so that re-entry must not re-fire the hook.
+    fire_backend_init = kwargs.pop("_fire_backend_init", True)
+
     def rebuild_ctx() -> OptimizeContext | _NullDecorator:
         ca_kwargs_override = config.compiled_autograd_kwargs_override
         if ca_kwargs_override:
@@ -1783,9 +1788,9 @@ def optimize(*args: Any, **kwargs: Any) -> OptimizeContext | _NullDecorator:
                     f"Only `fullgraph` kwarg override is supported for now, but got {ca_kwargs_override.keys()}"
                 )
             kwargs["nopython"] = ca_kwargs_override["fullgraph"]
-        return optimize(*args, **kwargs)
+        return optimize(*args, **kwargs, _fire_backend_init=False)
 
-    return _optimize(rebuild_ctx, *args, **kwargs)
+    return _optimize(rebuild_ctx, *args, _fire_backend_init=fire_backend_init, **kwargs)
 
 
 def _optimize(
@@ -1804,6 +1809,7 @@ def _optimize(
     recompile_limit: int | None = None,
     isolate_recompiles: bool = False,
     dynamic_shapes: ShapesSpec | ParamsSpec | dict[str, Any] | None = None,
+    _fire_backend_init: bool = True,
 ) -> OptimizeContext | _NullDecorator:
     """
     The main entrypoint of TorchDynamo.  Do graph capture and call
@@ -1816,7 +1822,6 @@ def _optimize(
             graph faster.
             One can also provide additional context for the backend, like
             torch.jit.fuser("fuser2"), by setting the backend_ctx_ctor attribute.
-            See AOTAutogradMemoryEfficientFusionWithContext for the usage.
             Backends can also run eager one-time initialization by defining a
             ``_dynamo_backend_init`` attribute (a no-arg callable); it is called
             once the backend is resolved, before backend_ctx_ctor. It is invoked
@@ -1877,15 +1882,19 @@ def _optimize(
             recompile_limit=recompile_limit,
             isolate_recompiles=isolate_recompiles,
             dynamic_shapes=dynamic_shapes,
+            _fire_backend_init=_fire_backend_init,
         )
 
     backend = get_compiler_fn(backend)
 
     # Allow backends to perform eager initialization (e.g., load native
     # libraries, initialize device contexts) before the first invocation.
-    backend_init = getattr(backend, "_dynamo_backend_init", None)
-    if backend_init is not None:
-        backend_init()
+    # Skipped on the compiled_autograd rebuild path (_fire_backend_init=False)
+    # so the hook honors its once-per-compile-site contract.
+    if _fire_backend_init:
+        backend_init = getattr(backend, "_dynamo_backend_init", None)
+        if backend_init is not None:
+            backend_init()
 
     # Find if backend has any extra context manager
     backend_ctx_ctor = getattr(backend, "backend_ctx_ctor", null_context)
@@ -2796,6 +2805,9 @@ def export(
 
 
 def optimize_assert(*args: Any, **kwargs: Any) -> OptimizeContext:
+    # See optimize(): the compiled autograd rebuild path must not re-fire the
+    # eager backend init hook.
+    fire_backend_init = kwargs.pop("_fire_backend_init", True)
     if "rebuild_ctx" in kwargs and kwargs["rebuild_ctx"] is not None:
         # called from optimize
         rebuild_ctx = kwargs["rebuild_ctx"]
@@ -2803,9 +2815,11 @@ def optimize_assert(*args: Any, **kwargs: Any) -> OptimizeContext:
     else:
 
         def rebuild_ctx() -> OptimizeContext:
-            return optimize_assert(*args, **kwargs)
+            return optimize_assert(*args, **kwargs, _fire_backend_init=False)
 
-    return _optimize_assert(rebuild_ctx, *args, **kwargs)
+    return _optimize_assert(
+        rebuild_ctx, *args, _fire_backend_init=fire_backend_init, **kwargs
+    )
 
 
 def _optimize_assert(
@@ -2820,6 +2834,7 @@ def _optimize_assert(
     recompile_limit: int | None = None,
     isolate_recompiles: bool = False,
     dynamic_shapes: ShapesSpec | ParamsSpec | dict[str, Any] | None = None,
+    _fire_backend_init: bool = True,
 ) -> OptimizeContext:
     """
     Guarantees single-graph capture.
@@ -2831,11 +2846,12 @@ def _optimize_assert(
     """
     backend = get_compiler_fn(backend)
 
-    # Allow backends to perform eager initialization (e.g., load native
-    # libraries, initialize device contexts) before the first invocation.
-    backend_init = getattr(backend, "_dynamo_backend_init", None)
-    if backend_init is not None:
-        backend_init()
+    # Eager backend init; see _optimize() for the once-per-compile-site contract.
+    # Skipped on the compiled_autograd rebuild path (_fire_backend_init=False).
+    if _fire_backend_init:
+        backend_init = getattr(backend, "_dynamo_backend_init", None)
+        if backend_init is not None:
+            backend_init()
 
     # Find if backend has any extra context manager
     backend_ctx_ctor = getattr(backend, "backend_ctx_ctor", null_context)
