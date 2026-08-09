@@ -23,7 +23,11 @@ from torch._dynamo.guards import (
     SKIP_GUARD,
     UnsupportedGuardCheckSpec,
 )
-from torch._dynamo.source import SyntheticLocalSource
+from torch._dynamo.source import (
+    _get_source_debug_name,
+    GetItemSource,
+    SyntheticLocalSource,
+)
 from torch._dynamo.utils import _make_inlined, unpack_iterable
 from torch._dynamo.variables.base import VariableTracker
 from torch._dynamo.variables.constant import ConstantVariable
@@ -34,6 +38,7 @@ from torch._dynamo.variables.nn_module import UnspecializedNNModuleVariable
 from torch._dynamo.variables.tensor import SymNodeVariable, TensorVariable
 from torch._dynamo.variables.user_defined import UserDefinedObjectVariable
 from torch._guards import (
+    ChainedSource,
     Guard,
     InvokeSubgraphReuseCondition,
     InvokeSubgraphReuseEntry,
@@ -644,6 +649,43 @@ def build_source_replacement(
     }
 
 
+def find_indexed_container(
+    cached_entry: InvokeSubgraphReuseEntry, expected: object
+) -> str | None:
+    """Name of a container a capture was subscripted out of at index ``expected``.
+
+    A region that subscripts a container with a value read from a guarded
+    location (e.g. ``pool.buffers[self.layer_id]``) bakes that index into the
+    capture's source, so the guard on the index fails for every distinct index
+    and the region is retraced per call. Naming the container lets the reuse
+    log point at the rewrite that restores reuse.
+
+    Captures reached through an argument's own source are skipped: the region
+    argument is already parameterized, so an index inside it is not what is
+    blocking reuse.
+    """
+    # type() rather than isinstance: True == 1 and False == 0, so a bool guard
+    # value would match any capture indexed at 0 or 1.
+    if type(expected) is not int:
+        return None
+    arg_sources = {s for s in cached_entry.arg_sources if s is not None}
+    for lifted in cached_entry.subgraph_input_mapping:
+        if not isinstance(lifted, LiftedCapturedSource):
+            continue
+        source = lifted.source
+        while isinstance(source, ChainedSource):
+            if source in arg_sources:
+                break
+            if (
+                isinstance(source, GetItemSource)
+                and not source.index_is_slice
+                and source.index == expected
+            ):
+                return _get_source_debug_name(source.base)
+            source = source.base
+    return None
+
+
 def is_reusable(
     tx: "InstructionTranslatorBase",
     condition: "InvokeSubgraphReuseCondition",
@@ -826,6 +868,24 @@ def is_reusable(
             return False
 
         if not handler.eval_fn(value, expected):
+            # Only value-match guards carry the read value itself; a length or
+            # type guard's metadata is not an index the region subscripted with.
+            container = (
+                find_indexed_container(cached_entry, expected)
+                if guard.create_fn_name() in ("CONSTANT_MATCH", "EQUALS_MATCH")
+                else None
+            )
+            # Phrased as an observation, not a diagnosis: the match is on the
+            # index value, so an unrelated guard that happens to equal an index
+            # reaches here too.
+            hint = (
+                f"\n  hint: a captured value is selected from '{container}' at "
+                "this index. If this value is that index, select the element at "
+                "the call site and pass it into the region as an argument -- an "
+                "index baked into a capture retraces the region per index."
+                if container
+                else ""
+            )
             hc_log.debug(
                 "subgraph_reuse: reuse failed --\n"
                 "  guard type: %s\n"
@@ -833,7 +893,7 @@ def is_reusable(
                 "  guard source name: %s\n"
                 "  expected: %s\n"
                 "  got: %s\n"
-                "  user stack:\n%s",
+                "  user stack:\n%s%s",
                 guard.create_fn_name(),
                 new_source,
                 new_source.name,
@@ -842,6 +902,7 @@ def is_reusable(
                 "".join(guard.user_stack.format())
                 if guard.user_stack
                 else "<no stack>",
+                hint,
             )
             return False
 

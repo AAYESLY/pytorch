@@ -4806,6 +4806,130 @@ class GraphModule(torch.nn.Module):
         self.assertEqual(res, fn(x))
         self.assertEqual(count(), 2)
 
+    def test_subgraph_reuse_element_selected_by_guarded_index(self):
+        """Subscripting a capture with a guarded index retraces; hoisting it reuses.
+
+        The index is baked into the lifted argument's source, so its guard fails
+        for every distinct index. Selecting the element at the call site instead
+        makes it a plain argument, which reuse handles.
+        See https://github.com/pytorch/pytorch/issues/191781
+        """
+
+        class Pool:
+            def __init__(self, buffers):
+                self.buffers = buffers
+
+        class Layer(torch.nn.Module):
+            def __init__(self, layer_id, pool):
+                super().__init__()
+                self.layer_id = layer_id
+                self.pool = pool
+
+            def forward(self, x):
+                return x.sin() + self.pool.buffers[self.layer_id]
+
+        n = 4
+        pool = Pool([torch.randn(8) for _ in range(n)])
+        layers = [Layer(i, pool) for i in range(n)]
+
+        @nested_compile_region
+        def gn_indexed(layer, x):
+            return layer(x)
+
+        def fn_indexed(x):
+            return sum(gn_indexed(layer, x) for layer in layers)
+
+        x = torch.randn(8)
+        with self._count_speculate_calls() as count:
+            res = torch.compile(fn_indexed, backend="aot_eager", fullgraph=True)(x)
+        self.assertEqual(res, fn_indexed(x))
+        # Current limitation: reuse cannot re-derive a capture selected by a
+        # guarded index, so every layer retraces. Drop to 1 if that changes.
+        self.assertEqual(count(), n)
+
+        @nested_compile_region
+        def gn_hoisted(x, buf):
+            return x.sin() + buf
+
+        def fn_hoisted(x):
+            return sum(gn_hoisted(x, pool.buffers[i]) for i in range(n))
+
+        torch._dynamo.reset()
+        with self._count_speculate_calls() as count:
+            res = torch.compile(fn_hoisted, backend="aot_eager", fullgraph=True)(x)
+        self.assertEqual(res, fn_hoisted(x))
+        self.assertEqual(count(), 1)
+
+    def test_subgraph_reuse_indexed_capture_hint(self):
+        """The reuse failure log names the container the region subscripted."""
+
+        class Pool:
+            def __init__(self, buffers):
+                self.buffers = buffers
+
+        class Layer(torch.nn.Module):
+            def __init__(self, layer_id, pool):
+                super().__init__()
+                self.layer_id = layer_id
+                self.pool = pool
+
+            def forward(self, x):
+                return x.sin() + self.pool.buffers[self.layer_id]
+
+        pool = Pool([torch.randn(8), torch.randn(8)])
+        layers = [Layer(i, pool) for i in range(2)]
+
+        @nested_compile_region
+        def gn(layer, x):
+            return layer(x)
+
+        def fn(x):
+            return gn(layers[0], x) + gn(layers[1], x)
+
+        x = torch.randn(8)
+        # assertLogs enables the artifact logger on its own; set_logs() would
+        # clear unrelated log state for the rest of the process.
+        with self.assertLogs(
+            "torch._dynamo.variables.invoke_subgraph.__hierarchical_compile",
+            level="DEBUG",
+        ) as logs:
+            torch.compile(fn, backend="aot_eager", fullgraph=True)(x)
+        hints = [r for r in logs.output if "is selected from" in r]
+        self.assertTrue(hints, f"no indexed-capture hint in {logs.output}")
+        self.assertIn("pool.buffers", hints[0])
+
+    def test_subgraph_reuse_hoisted_element_mutated_per_call(self):
+        """A reused region mutating a per-call argument writes only its own element.
+
+        Guards against a stamped-out region reapplying the first call's argument,
+        which would mutate one buffer repeatedly instead of each in turn.
+        """
+
+        @nested_compile_region
+        def gn(x, buf):
+            buf.add_(x)
+            return buf.sum()
+
+        n = 4
+
+        def fn(x, buffers):
+            return sum(gn(x, buffers[i]) for i in range(n))
+
+        x = torch.ones(4)
+        # Distinct starting values so a cross-element write is visible.
+        eager_buffers = [torch.full((4,), (i + 1) * 100.0) for i in range(n)]
+        compiled_buffers = [torch.full((4,), (i + 1) * 100.0) for i in range(n)]
+
+        expected = fn(x, eager_buffers)
+        with self._count_speculate_calls() as count:
+            res = torch.compile(fn, backend="aot_eager", fullgraph=True)(
+                x, compiled_buffers
+            )
+        self.assertEqual(res, expected)
+        self.assertEqual(count(), 1)
+        for eager_buf, compiled_buf in zip(eager_buffers, compiled_buffers):
+            self.assertEqual(eager_buf, compiled_buf)
+
     def test_subgraph_reuse_rebound_global_read_via_side_effects(self):
         """A region reading a global that is rebound between calls must retrace."""
         global _reuse_test_global
