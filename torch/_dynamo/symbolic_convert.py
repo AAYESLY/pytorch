@@ -1122,6 +1122,8 @@ def break_graph_if_unsupported(
                             *graph_break_hints.CAUSED_BY_EARLIER_GRAPH_BREAK,
                         ],
                         from_exc=excp,
+                        skip_frame=excp.skip_frame,
+                        preserve_skip_frame_after_inline=excp.preserve_skip_frame_after_inline,
                     )
 
                 if getattr(excp, "skip_frame", False):
@@ -6245,9 +6247,10 @@ class InliningInstructionTranslator(InstructionTranslatorBase):
             # bubble up the exception to the parent frame.
             raise
         except (Unsupported, UserError) as e:
-            # If this graph break has skip_frame set, unset it
-            # since it refers to the current frame and not the parent.
-            e.skip_frame = False
+            if not e.preserve_skip_frame_after_inline:
+                # If this graph break has skip_frame set, unset it
+                # since it refers to the current frame and not the parent.
+                e.skip_frame = False
             raise
         except Exception:
             log.debug("FAILED INLINING %s", code)

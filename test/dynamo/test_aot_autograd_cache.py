@@ -1705,8 +1705,10 @@ class AOTAutogradCacheTests(CacheKeyEquivalenceMixin, InductorTestCase):
 
         @torch.compile  # noqa: UNSPECIFIED_BACKEND
         def fn(x):
-            # Calls x.sum().backward() during forward execution of fn
-            (x_grad,) = torch.autograd.grad(x.sum(), x)
+            # Compile x.sum(), then run its backward after a graph break.
+            y = x.sum()
+            torch._dynamo.graph_break()
+            (x_grad,) = torch.autograd.grad(y, x)
             return x_grad
 
         a = torch.randn(10, 10, requires_grad=True, device="cpu")
