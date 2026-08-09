@@ -482,16 +482,24 @@ class ConfigModule(ModuleType):
 
     def _get_alias_module_and_name(
         self, entry: _ConfigEntry
-    ) -> tuple[ModuleType, str] | None:
+    ) -> tuple[object, str] | None:
         alias = entry.alias
         if alias is None:
             return None
-        module_name, constant_name = alias.rsplit(".", 1)
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError as e:
-            raise AttributeError(f"config alias {alias} does not exist") from e
-        return module, constant_name
+        # The leading components of the alias form an importable module and the
+        # trailing components are attributes on it (e.g. a `cutlass.foo`
+        # sub-config field of torch._inductor.config). Import the longest
+        # importable module prefix, then walk the remaining attributes.
+        parts = alias.split(".")
+        for i in range(len(parts) - 1, 0, -1):
+            try:
+                container: Any = importlib.import_module(".".join(parts[:i]))
+            except ImportError:
+                continue
+            for attr in parts[i:-1]:
+                container = getattr(container, attr)
+            return container, parts[-1]
+        raise AttributeError(f"config alias {alias} does not exist")
 
     def _get_alias_val(self, entry: _ConfigEntry) -> Any:
         data = self._get_alias_module_and_name(entry)
@@ -999,12 +1007,23 @@ def get_tristate_env(name: str, default: Any = None) -> bool | None:
     return default
 
 
-def inherit_fields_from(parent_cls):
+def alias_fields_from(parent_cls):
+    """Class decorator adding an alias for every public field of ``parent_cls``
+    that the decorated class does not override.
+
+    Unlike copying, aliases resolve dynamically: reading or writing an aliased
+    field on the child reads/writes the parent's field, so later changes to the
+    parent (e.g. user overrides) are reflected on the child.
+    """
+    prefix = f"{parent_cls.__module__}.{parent_cls.__qualname__}"
+    annotations = inspect.get_annotations(parent_cls)
+
     def wrapper(child_cls):
         for k, v in parent_cls.__dict__.items():
-            # copy fields that are not private and not overridden
-            if not k.startswith("_") and k not in child_cls.__dict__:
-                setattr(child_cls, k, v)
+            if k.startswith("_") or k in child_cls.__dict__:
+                continue
+            value_type = annotations.get(k, type(v))
+            setattr(child_cls, k, Config(alias=f"{prefix}.{k}", value_type=value_type))
         return child_cls
 
     return wrapper

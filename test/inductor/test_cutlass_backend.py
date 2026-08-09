@@ -273,6 +273,30 @@ class TestCutlassBackend(TestCase):
         self.assertTrue(os.path.exists(cutlass_mock_pydot_path))
         self.assertTrue(os.path.exists(cutlass_mock_scipy_path))
 
+    @parametrize("sub", ("cuda", "xpu"))
+    def test_config_alias_to_cutlass(self, sub):
+        # cuda/xpu do not copy cutlass fields; fields they do not define alias
+        # to cutlass and resolve dynamically.
+        subconfig = getattr(config, sub)
+
+        # A field not defined on the subconfig reads through to cutlass.
+        self.assertEqual(subconfig.compile_opt_level, config.cutlass.compile_opt_level)
+
+        # Updating cutlass is reflected immediately through the alias.
+        with config.patch({"cutlass.compile_opt_level": "-O3"}):
+            self.assertEqual(subconfig.compile_opt_level, "-O3")
+
+        # Writing through the subconfig name mutates the shared cutlass field.
+        with config.patch({f"{sub}.use_fast_math": True}):
+            self.assertTrue(subconfig.use_fast_math)
+            self.assertTrue(config.cutlass.use_fast_math)
+
+        # Fields defined directly on the subconfig are independent real keys.
+        self.assertIn(f"{sub}.arch", config._config)
+        self.assertNotIn("cutlass.arch", config._config)
+        with config.patch({f"{sub}.arch": "sm_test"}):
+            self.assertEqual(subconfig.arch, "sm_test")
+
     @skipXPUIf(not Xe2_Or_Later, "")
     @skipCUDAIf(not SM90OrLater, "need sm_90")
     @xfailIfSM120OrLater
