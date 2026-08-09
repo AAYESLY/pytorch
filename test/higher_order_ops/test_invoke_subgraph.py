@@ -4811,7 +4811,9 @@ class GraphModule(torch.nn.Module):
 
         The index is baked into the lifted argument's source, so its guard fails
         for every distinct index. Selecting the element at the call site instead
-        makes it a plain argument, which reuse handles.
+        makes it a plain argument, which reuse handles. Stacking the elements
+        into one tensor and scanning over it avoids the Python index entirely,
+        at the cost of requiring a uniform body.
         See https://github.com/pytorch/pytorch/issues/191781
         """
 
