@@ -1761,25 +1761,6 @@ class ROCmConfigHeuristic(BaseConfigHeuristic):
             for kpack in [1, 2]
         ]
 
-    def _prune_exhaustive_configs(
-        self,
-        configs: list[BaseConfig],
-        dtype_size: int,
-    ) -> list[BaseConfig]:
-        # these cause AMD compile to crash
-        pruned_configs = [
-            c
-            for c in configs
-            if not (
-                (
-                    getattr(c, "matrix_instr_nonkdim", 0) == 2
-                    and getattr(c, "kpack", 0) == 2
-                )
-                or (c.block_k <= 16 and getattr(c, "kpack", 0) == 2)
-            )
-        ]
-        return pruned_configs
-
     def _filter_configs(self, configs: list[BaseConfig]) -> list[BaseConfig]:
         """
         ROCm specific filtering
