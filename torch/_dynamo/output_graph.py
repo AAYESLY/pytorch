@@ -951,6 +951,13 @@ class OutputGraph(OutputGraphCommon):
             ],
         ] = {}
 
+        # Stack of open invoke_subgraph regions. The innermost collects the
+        # subscripts the region did with an index read from a guarded location,
+        # whose guard is deferred until the region closes. See Note:
+        # [invoke_subgraph index parameterization] in
+        # torch/_dynamo/variables/invoke_subgraph.py.
+        self.deferred_index_regions: list[list[Any]] = []
+
         # Use to pass values to backward hooks when using compiled autograd
         self.backward_state: dict[str, VariableTracker] = {}
         self.backward_state_proxy: torch.fx.Proxy | None = None
