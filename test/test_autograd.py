@@ -4506,7 +4506,6 @@ class TestAutograd(TestCase):
         class QueryInput(torch.autograd.Function):
             @staticmethod
             def forward(ctx, scale, x, flag, y):
-                QueryInput.ctx = ctx
                 QueryInput.forward_seen = ctx.get_input_grad_dtype()
                 return x * scale + y
 
@@ -4521,15 +4520,36 @@ class TestAutograd(TestCase):
         output = QueryInput.apply(scale=2.0, x=x, flag=True, y=y)
         expected = (None, torch.float16, None, None)
         self.assertEqual(QueryInput.forward_seen, expected)
-        self.assertEqual(QueryInput.ctx.get_input_grad_dtype(), expected)
         output.sum().backward()
         self.assertEqual(QueryInput.backward_seen, expected)
-        self.assertEqual(QueryInput.ctx.get_input_grad_dtype(), expected)
 
         x = torch.tensor([1.0, 2.0], requires_grad=True)
         x.grad_dtype = None
+        y = torch.tensor([3.0, 4.0], requires_grad=True)
+        y.grad_dtype = torch.float64
         QueryInput.apply(2.0, x, True, y)
-        self.assertEqual(QueryInput.forward_seen, (None, None, None, None))
+        self.assertEqual(QueryInput.forward_seen, (None, None, None, torch.float64))
+
+    @skipIfTorchDynamo("grad_dtype not supported in compile")
+    def test_ctx_input_grad_dtype_without_backward_graph(self):
+        class QueryInput(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                QueryInput.seen = ctx.get_input_grad_dtype()
+                return x.clone()
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                return grad_output
+
+        x = torch.tensor([1.0, 2.0], requires_grad=True)
+        x.grad_dtype = torch.float16
+        with torch.no_grad():
+            QueryInput.apply(x)
+        self.assertEqual(QueryInput.seen, (None,))
+
+        QueryInput.apply(torch.tensor([1.0, 2.0]))
+        self.assertEqual(QueryInput.seen, (None,))
 
     @skipIfTorchDynamo("grad_dtype not supported in compile")
     def test_ctx_input_grad_dtype_live_read(self):
@@ -4579,6 +4599,10 @@ class TestAutograd(TestCase):
 
             @staticmethod
             def backward(ctx, first_grad, second_grad):
+                DeclareOutputDtypes.backward_seen = (
+                    first_grad.dtype,
+                    second_grad.dtype,
+                )
                 return first_grad.to(torch.float32) + second_grad.to(torch.float32)
 
         class QueryInputs(torch.autograd.Function):
@@ -4589,12 +4613,30 @@ class TestAutograd(TestCase):
 
             @staticmethod
             def backward(ctx, grad_output):
-                return grad_output.to(torch.float64), grad_output
+                QueryInputs.backward_seen = ctx.get_input_grad_dtype()
+                first_dtype, second_dtype = QueryInputs.backward_seen
+                first_grad = (
+                    grad_output.to(first_dtype)
+                    if first_dtype is not None
+                    else grad_output
+                )
+                second_grad = (
+                    grad_output.to(second_dtype)
+                    if second_dtype is not None
+                    else grad_output
+                )
+                return first_grad, second_grad
 
         x = torch.tensor([1.0, 2.0], requires_grad=True)
         first, second = DeclareOutputDtypes.apply(x)
-        QueryInputs.apply(first, second)
+        output = QueryInputs.apply(first, second)
         self.assertEqual(QueryInputs.seen, (torch.float64, None))
+        output.sum().backward()
+        self.assertEqual(QueryInputs.backward_seen, (torch.float64, None))
+        self.assertEqual(
+            DeclareOutputDtypes.backward_seen, (torch.float64, torch.float32)
+        )
+        self.assertEqual(x.grad.dtype, torch.float32)
 
     @skipIfTorchDynamo("grad_dtype not supported in compile")
     def test_ctx_input_grad_dtype_setup_context_and_jvp(self):
@@ -4626,6 +4668,8 @@ class TestAutograd(TestCase):
             dual = fwAD.make_dual(x, torch.ones_like(x))
             QuerySetupContext.apply(dual)
 
+        # make_dual produces a view with its own gradient edge metadata, which
+        # defaults to the primal dtype instead of inheriting x.grad_dtype.
         self.assertEqual(QuerySetupContext.setup_seen, (torch.float32,))
         self.assertEqual(QuerySetupContext.jvp_seen, (torch.float32,))
 

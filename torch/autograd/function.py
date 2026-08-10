@@ -276,14 +276,21 @@ class FunctionCtx:
     def get_input_grad_dtype(self) -> "tuple[torch.dtype | None, ...]":
         r"""Return the expected gradient dtype for each of this Function's inputs.
 
-        This method may be called from any Function method. The returned tuple
-        has one entry for each input passed to :meth:`forward`, and each entry
-        corresponds positionally to the gradient returned by :meth:`backward`.
+        The returned tuple aligns with the inputs to :meth:`forward` and the
+        gradients returned by :meth:`backward`. For each input:
 
-        For each input, a :class:`torch.dtype` is the dtype that
-        :meth:`backward` should use for its gradient. ``None`` means that any
-        dtype is accepted. Non-Tensor and non-differentiable inputs also have
-        ``None`` because they do not receive gradients.
+        - A :class:`torch.dtype` is the dtype that backward should use for its
+          gradient.
+        - ``None`` for a differentiable Tensor means that any dtype is accepted.
+        - ``None`` for a non-Tensor or an input that does not require gradients
+          means that it receives no gradient.
+
+        :attr:`needs_input_grad` distinguishes the two ``None`` cases when a
+        backward graph exists.
+
+        If no backward graph is created, such as under :func:`torch.no_grad` or
+        when no input requires gradients, every entry is ``None``.
+        This method is not currently supported by :func:`torch.compile`.
 
         For example::
 

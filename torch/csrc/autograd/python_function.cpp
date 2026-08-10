@@ -1715,11 +1715,23 @@ static PyObject* THPFunction_input_grad_dtype(PyObject* self_, PyObject*) {
     return nullptr;
   }
 
+  // Non-executable Functions have no next edges because no input gradients
+  // will be computed. Otherwise, there is one edge per Tensor input.
+  const bool has_next_edges = !next_edges.empty();
+  if (has_next_edges) {
+    TORCH_INTERNAL_ASSERT(
+        next_edges.size() ==
+        static_cast<size_t>(std::count(
+            self->is_variable_input.begin(),
+            self->is_variable_input.end(),
+            true)));
+  }
+
   size_t variable_index = 0;
   for (const auto i : c10::irange(self->is_variable_input.size())) {
     PyObject* dtype = Py_None;
     if (self->is_variable_input[i]) {
-      if (variable_index < next_edges.size()) {
+      if (has_next_edges) {
         const auto& edge = next_edges[variable_index];
         if (edge.function) {
           const auto& metadata = edge.function->input_metadata(edge.input_nr);
