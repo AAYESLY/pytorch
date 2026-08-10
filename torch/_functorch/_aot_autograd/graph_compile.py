@@ -2368,9 +2368,7 @@ def _aot_stage2b_bw_compile(
                 # strides are the same, we assume they are not.
                 with suppress_ctx:
                     for k in range(len(ph_arg.stride())):
-                        # real_stride can't be symbolic.
-
-                        if guard_or_true(ph_arg.stride()[k] != int(real_stride[k])):
+                        if guard_or_true(ph_arg.stride()[k] != real_stride[k]):
                             stride_different = True
                             break
 
