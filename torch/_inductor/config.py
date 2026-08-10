@@ -236,6 +236,12 @@ runtime_triton_nan_asserts = (
 )
 scalar_asserts = os.environ.get("TORCHINDUCTOR_SCALAR_ASSERTS", "1") == "1"
 
+# Emit range bounds -- inequalities against a constant ("u0 >= 4"). Narrows
+# scalar_asserts above, so it has no effect when that is off. Set False
+# to skip them; a hand-written torch._check(u0 < N) goes too, since codegen
+# sees the expression, not its origin.
+scalar_range_asserts = os.environ.get("TORCHINDUCTOR_SCALAR_RANGE_ASSERTS", "1") == "1"
+
 # Disable by default in fbcode
 alignment_asserts = (
     os.environ.get("TORCHINDUCTOR_ALIGNMENT_ASSERTS", "0" if is_fbcode() else "1")

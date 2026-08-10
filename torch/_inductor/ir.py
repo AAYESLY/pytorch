@@ -136,6 +136,7 @@ from .utils import (
     tensor_is_aligned,
     VarRanges,
 )
+from .sizevars import is_range_bound
 from .virtualized import ops, OpsValue, V
 
 
@@ -9438,6 +9439,8 @@ class AssertScalar(ExternKernel):
 
     def codegen(self, wrapper: PythonWrapperCodegen) -> None:
         if not config.scalar_asserts:
+            return
+        if not config.scalar_range_asserts and is_range_bound(self.scalar):
             return
         # NB: It is EXTREMELY important not to simplify the scalar under assertion here,
         # because simplify is done with respect to runtime asserts.  So if you have
