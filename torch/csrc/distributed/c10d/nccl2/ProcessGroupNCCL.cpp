@@ -73,13 +73,18 @@ at::Tensor copyToNonExpandableTensor(
     c10::DeviceIndex device_index) {
   void* data = nullptr;
   C10_CUDA_CHECK(cudaMalloc(&data, input.nbytes()));
-  auto deleter = [device_index](void* ptr) {
+  auto deleter = [device_index, stream](void* ptr) {
     c10::cuda::CUDAGuard device_guard(
         c10::Device(c10::DeviceType::CUDA, device_index));
+    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
     C10_CUDA_CHECK(cudaFree(ptr));
   };
   auto staged = at::from_blob(
-      data, input.sizes(), input.strides(), std::move(deleter), input.options());
+      data,
+      input.sizes(),
+      input.strides(),
+      std::move(deleter),
+      input.options());
 
   auto operation_stream = at::cuda::getStreamFromExternal(stream, device_index);
   at::cuda::CUDAStreamGuard stream_guard(operation_stream);
@@ -1234,17 +1239,16 @@ c10::intrusive_ptr<WorkNCCL> ProcessGroupNCCL::allGatherSingleImpl(
   if (comm_size_ > 1 && input.numel() > 0 &&
       isTensorInExpandableSegment(input)) {
     // RCCL P2P can silently read stale data from VMM-backed expandable send
-    // buffers. Stage the send side through cudaMalloc memory and keep both
-    // tensors alive for async work.
+    // buffers. Stage the send side through cudaMalloc memory.
     nccl_input = copyToNonExpandableTensor(input, stream, device_.index());
   }
 #endif
-  auto work = async_op
-      ? (nccl_input.unsafeGetTensorImpl() == input.unsafeGetTensorImpl()
-             ? createWork(stream, timeout, input)
-             : createWork(
-                   stream, timeout, std::vector<at::Tensor>{input, nccl_input}))
-      : createWork(stream, timeout);
+  const bool staged_input =
+      nccl_input.unsafeGetTensorImpl() != input.unsafeGetTensorImpl();
+  auto work = staged_input
+      ? createWork(stream, timeout, std::vector<at::Tensor>{input, nccl_input})
+      : (async_op ? createWork(stream, timeout, input)
+                  : createWork(stream, timeout));
 
   work->recordStart("allGatherSingleImpl");
 

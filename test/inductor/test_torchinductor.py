@@ -124,7 +124,6 @@ from torch.testing._internal.common_utils import (
     skipIfNoLapack,
     skipIfRocm,
     skipIfRocmArch,
-    skipIfRocmVersionAtLeast,
     skipIfTorchInductor,
     skipIfWindows,
     skipIfXpu,
