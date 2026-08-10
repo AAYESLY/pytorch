@@ -57,7 +57,7 @@ from torch.testing._internal.common_device_type import (
     dtypesIfMPS,
     expectedFailureMPS,
     instantiate_device_type_tests,
-    onlyCPU,
+    onlyAccelerator,
     onlyCUDA,
     skipMeta,
 )
@@ -67,6 +67,7 @@ from torch.testing._internal.common_utils import (
     disable_gc,
     gradcheck,
     gradgradcheck,
+    HardwareClassification,
     instantiate_parametrized_tests,
     IS_ARM64,
     IS_LINUX,
@@ -121,6 +122,8 @@ def graph_desc(fn):
 
 
 class TestAutograd(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def tearDown(self):
         torch.autograd._force_original_view_tracking(False)
         super().tearDown()
@@ -12879,6 +12882,8 @@ def bernoulli_scalar():
 
 
 class TestAutogradForwardModeBatchedGrad(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def test_out_of_place_basic(self):
         a = torch.rand(4, 4, dtype=torch.double, requires_grad=True)
         b = torch.rand(4, 4, dtype=torch.double, requires_grad=True)
@@ -12988,6 +12993,8 @@ class TestAutogradForwardModeBatchedGrad(TestCase):
 
 
 class TestAutogradForwardMode(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def tearDown(self):
         # Ensure that a failing test won't make others fail
         while fwAD._current_level >= 0:
@@ -13688,6 +13695,8 @@ class TestAutogradForwardMode(TestCase):
 
 # Generic device type autograd tests.
 class TestAutogradDeviceType(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
+
     def test_min_max_aminmax_median_backprops_to_all_values(self, device):
         # 1) Test min/max/median/nanmedian on both a non NaN and all NaN tensor
         for f in [torch.min, torch.max, torch.median, torch.nanmedian]:
@@ -13973,7 +13982,8 @@ class TestAutogradDeviceType(TestCase):
                 ):
                     f()
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_advanced_indexing_backwards_large(self, device):
         # See https://github.com/pytorch/pytorch/issues/22843
         n = 1 << 16
@@ -14031,14 +14041,17 @@ class TestAutogradDeviceType(TestCase):
         self.assertIsNone(t1.grad)
         self.assertIsNone(t3.grad)
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_reentrant_parent_error_on_cpu(self, device):
         def _get_cuda_memory_usage():
             # we don't need CUDA synchronize because the statistics are not tracked at
             # actual freeing, but at when marking the block as free.
-            num_devices = torch.cuda.device_count()
+            num_devices = torch.accelerator.device_count()
             gc.collect()
-            return tuple(torch.cuda.memory_allocated(i) for i in range(num_devices))
+            return tuple(
+                torch.accelerator.memory_allocated(i) for i in range(num_devices)
+            )
 
         before = _get_cuda_memory_usage()
 
@@ -14091,22 +14104,24 @@ class TestAutogradDeviceType(TestCase):
         gradcheck(where_scalar_second, (cond, x))
         gradgradcheck(where_scalar_second, (cond, x))
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_free_unneeded_tensor(self, device):
         x = torch.randn(2, 3, 10, 10, device=device, requires_grad=True)
         m = torch.randn(1, 3, 1, 1, device=device)
 
         z = x.sum()
-        base_mem = torch.cuda.memory_allocated()
+        base_mem = torch.accelerator.memory_allocated()
         z = ((x + 2) * m).sum()
-        end_mem = torch.cuda.memory_allocated()
+        end_mem = torch.accelerator.memory_allocated()
 
         # In the end the memory usage should remain equal, because neither of
         # (x + 2) and ((x + 2) * m) should be kept alive for backward, while the
         # previous allocation of z had the same size as the current one.
         self.assertEqual(base_mem, end_mem)
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_pin_memory(self, device):
         x = torch.randn(2, 2, dtype=torch.double, requires_grad=True)
         self.assertEqual(x, x.pin_memory())
@@ -14126,7 +14141,8 @@ class TestAutogradDeviceType(TestCase):
             with emit_nvtx():
                 a.add(1.0)
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_rnn_backward_to_input_but_not_parameters(self, device):
         # this checks whether it is possible to not require
         # weight parameters, but require inputs, see #7722
@@ -14236,7 +14252,7 @@ class TestAutogradDeviceType(TestCase):
         output = input.to(device=devices[1]) + input.to(device=devices[1])
         output.backward()
 
-    @onlyCPU
+    @skipIfMPS  # the test doesn't work on MPS
     def test_copy_(self, device):
         # At the time of writing this test, copy_ is not generated from native_functions.yaml
         # there was a bug that bfloat16 was not recognized as floating.
@@ -14270,7 +14286,8 @@ class TestAutogradDeviceType(TestCase):
             non_dual.copy_(x_dual)
             self.assertTrue(fwAD.unpack_dual(non_dual).tangent is not tangent)
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_simple_reentrant_cross_device(self, device):
         class ReentrantFunc(Function):
             _cpu_mode = True
@@ -14309,7 +14326,8 @@ class TestAutogradDeviceType(TestCase):
         out = ReentrantFunc.apply(x)
         out.sum().backward()
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_cross_device_reentrant_autograd(self, device):
         # Output on gpu so that this task will be associated with the gpu thread
         def fn_on_gpu(inp):
@@ -14576,13 +14594,14 @@ class TestAutogradDeviceType(TestCase):
         gradcheck(fn, (vec))
         gradgradcheck(fn, (vec))
 
-    @onlyCUDA
+    @onlyAccelerator
+    @skipIfMPS  # the test doesn't work on MPS
     def test_gradcheck_input_output_different_device(self, device):
-        x = torch.ones((1,), dtype=torch.double, device="cuda", requires_grad=True)
+        x = torch.ones((1,), dtype=torch.double, device=device, requires_grad=True)
         gradcheck(lambda x: x.to("cpu"), (x,))
 
         x = torch.ones((1,), dtype=torch.double, device="cpu", requires_grad=True)
-        gradcheck(lambda x: x.to("cuda"), (x,))
+        gradcheck(lambda x: x.to(device), (x,))
 
     @unittest.skipIf(
         IS_LINUX or TEST_WITH_SLOW, "https://github.com/pytorch/pytorch/issues/181229"
@@ -14929,6 +14948,8 @@ class TestAutogradDeviceType(TestCase):
 
 
 class TestAllowMutationOnSaved(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def assertClonedLenEqual(self, ctx, n):
         self.assertEqual(len(list(ctx.cloned.items())), n)
 
@@ -15126,6 +15147,8 @@ class TestAllowMutationOnSaved(TestCase):
 
 
 class TestAutogradInferenceMode(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def _is_inference_tensor(self, tensor):
         try:
             err_msg = "Inference tensors do not track version counter"
@@ -15549,6 +15572,8 @@ def _get_device_name(idx):
 # Although this is written to be generic over all accelerators, non-cuda accelerators
 # are not fully tested since sleep is only supported on cuda.
 class TestAutogradStreamSynchronization(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
+
     def get_default_streams(self, num_devices=1):
         out = []
         for i in range(num_devices):
@@ -16022,6 +16047,8 @@ class TestAutogradStreamSynchronization(TestCase):
 
 
 class TestMultithreadAutograd(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     def _run_py_multithread_fn(
         self, fn, args=(), num_threads=10, kwargs=None, pass_idx=False
     ):
@@ -16461,6 +16488,8 @@ class TestMultithreadAutograd(TestCase):
 
 
 class TestNestedCheckpoint(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     @staticmethod
     def grad(fn):
         def wrapper(x):
@@ -16978,6 +17007,8 @@ class _AutoNamingMode(TorchDispatchMode):
 
 
 class TestSelectiveActivationCheckpoint(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     @unittest.skipIf(not TEST_CUDA, "requires CUDA")
     def test_flops_and_mem(self):
         # From https://github.com/pytorch/pytorch/pull/126320
@@ -17609,6 +17640,8 @@ class TestSACAmbientSavedTensorsHooks(TestCase):
     # The respect_saved_tensors_hooks arg of checkpoint() opts into routing them
     # through the hook; the default (legacy) leaves them untouched and warns.
     # These tests pin both behaviors so the eventual default flip is explicit.
+    hw_classification = HardwareClassification.GENERIC
+
     class RecordingHooks:
         # Records the shapes pack sees without transforming the tensor, so it is
         # numerically transparent (models a CPU-offload hook on CPU).
@@ -17843,6 +17876,8 @@ class TestSACAmbientSavedTensorsHooks(TestCase):
 
 
 class TestAutogradMultipleDispatch(TestCase):
+    hw_classification = HardwareClassification.ACCELERATOR
+
     def test_autograd_multiple_dispatch_registrations(self, device):
         t = torch.randn(3, 3, device=device, requires_grad=True)
         # using _test_autograd_multiple_dispatch.fullcoverage which has
@@ -17958,7 +17993,6 @@ class TestAutogradMultipleDispatch(TestCase):
             # Default gradient registered is grad.reshape_as(self)
             self.assertEqual(t.grad, grad.reshape_as(t))
 
-    @onlyCPU
     def test_per_dispatch_key_input_saving(self, device):
         # Tests that sum.dim_IntList's input is not saved for regular tensors but is saved for nested tensors
         def foo(x):
@@ -17986,8 +18020,8 @@ class TestAutogradMultipleDispatch(TestCase):
     @unittest.skipIf(
         IS_LINUX or TEST_WITH_SLOW, "https://github.com/pytorch/pytorch/issues/181272"
     )
-    @onlyCUDA
-    def test_backward_single_threaded(self):
+    @onlyAccelerator
+    def test_backward_single_threaded(self, device):
         threads_eq = None
 
         class TestFn(Function):
@@ -18003,7 +18037,7 @@ class TestAutogradMultipleDispatch(TestCase):
                 threads_eq = ctx.tid == threading.get_ident()
                 return gO, None
 
-        inp = torch.rand(10, device="cuda", requires_grad=True)
+        inp = torch.rand(10, device=device, requires_grad=True)
 
         with torch.autograd.set_multithreading_enabled(False):
             TestFn.apply(inp, None).sum().backward()
@@ -18012,8 +18046,8 @@ class TestAutogradMultipleDispatch(TestCase):
         TestFn.apply(inp, None).sum().backward()
         self.assertFalse(threads_eq)
 
-    @onlyCUDA
-    def test_backward_tls_stash(self):
+    @onlyAccelerator
+    def test_backward_tls_stash(self, device):
         local = threading.local()
         local.my_obj = {}
         local.my_obj[10] = 10
@@ -18032,7 +18066,7 @@ class TestAutogradMultipleDispatch(TestCase):
                 torch._C._get_obj_in_tls("my_obj")[10] = 5
                 return gO, None
 
-        inp = torch.rand(10, device="cuda", requires_grad=True)
+        inp = torch.rand(10, device=device, requires_grad=True)
 
         TestFn.apply(inp, None).sum().backward()
         self.assertEqual(local.my_obj[10], 5)
@@ -18201,6 +18235,8 @@ class TestAutogradMultipleDispatch(TestCase):
 
 @skipIfTorchDynamo("tests eager C++ error paths that Dynamo does not reproduce")
 class TestFunctionAssertMessages(TestCase):
+    hw_classification = HardwareClassification.GENERIC
+
     # THPFunction_assert forwards to a printf-style formatter. Regression tests
     # that the dynamic content (offending type name / index) is not silently
     # dropped from the error message.
