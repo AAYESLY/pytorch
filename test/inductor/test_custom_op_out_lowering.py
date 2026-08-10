@@ -150,7 +150,7 @@ class TestCustomOpOutLoweringAccelerator(InductorTestCase):
 
 
 instantiate_device_type_tests(
-    TestCustomOpOutLoweringAccelerator, globals(), allow_mps=True, allow_xpu=True
+    TestCustomOpOutLoweringAccelerator, globals(), allow_xpu=True
 )
 
 
