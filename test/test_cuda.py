@@ -697,16 +697,20 @@ print(t.is_pinned())
             tensor = torch.zeros(1024, device="cuda")
             torch.cuda.empty_cache()
             total_memory = torch.cuda.get_device_properties(0).total_memory
-            torch.cuda.set_per_process_memory_fraction(0.5, 0)
+            fraction = 0.05 if TEST_WITH_ROCM and EXPANDABLE_SEGMENTS else 0.5
+            torch.cuda.set_per_process_memory_fraction(fraction, 0)
 
-            # test 0.499 allocation is ok.
-            application = int(total_memory * 0.499) - torch.cuda.max_memory_reserved()
+            # test allocation just under the cap is ok.
+            application = (
+                int(total_memory * (fraction - 0.001))
+                - torch.cuda.max_memory_reserved()
+            )
             tmp_tensor = torch.empty(application, dtype=torch.int8, device="cuda")
             del tmp_tensor
             torch.cuda.empty_cache()
 
-            application = int(total_memory * 0.5)
-            # it will get OOM when try to allocate more than half memory.
+            application = int(total_memory * fraction)
+            # it will get OOM when trying to allocate more than allowed memory.
             oom_regex = (
                 "would exceed allowed memory"
                 if TEST_CUDAMALLOCASYNC
@@ -9528,39 +9532,51 @@ class TestMemPool(TestCase):
         def align_down_2mb(n):
             return n & ~(2 * MB - 1)
 
-        for label, make_ctx in [
-            ("default pool", lambda: contextlib.nullcontext()),
-            (
-                "user mempool",
-                lambda: torch.cuda.use_mem_pool(torch.cuda.MemPool()),
-            ),
-        ]:
-            with self.subTest(label=label):
-                torch.cuda.empty_cache()
-                free_before = torch.cuda.mem_get_info(device)[0]
+        orig_fraction = torch.cuda.get_per_process_memory_fraction(device)
+        try:
+            for label, make_ctx in [
+                ("default pool", lambda: contextlib.nullcontext()),
+                (
+                    "user mempool",
+                    lambda: torch.cuda.use_mem_pool(torch.cuda.MemPool()),
+                ),
+            ]:
+                with self.subTest(label=label):
+                    torch.cuda.empty_cache()
+                    free_before, total_memory = torch.cuda.mem_get_info(device)
+                    memory_limit = free_before
+                    if TEST_WITH_ROCM and EXPANDABLE_SEGMENTS:
+                        memory_limit = min(free_before, 512 * MB)
+                        torch.cuda.set_per_process_memory_fraction(
+                            memory_limit / total_memory, device
+                        )
 
-                fill_size = align_down_2mb(free_before // 2)
-                if fill_size < 64 * MB:
-                    self.skipTest("Not enough GPU memory for this test")
+                    fill_size = align_down_2mb(memory_limit // 2)
+                    if fill_size < 64 * MB:
+                        self.skipTest("Not enough GPU memory for this test")
 
-                filler = torch.empty(fill_size, dtype=torch.uint8, device=device)
-                del filler
+                    filler = torch.empty(fill_size, dtype=torch.uint8, device=device)
+                    del filler
 
-                alloc_size = align_down_2mb(free_before - free_before // 8)
-                oom = False
-                try:
-                    with make_ctx():
-                        big = torch.empty(alloc_size, dtype=torch.uint8, device=device)
-                        del big
-                except torch.cuda.OutOfMemoryError:
-                    oom = True
+                    alloc_size = align_down_2mb(memory_limit - memory_limit // 8)
+                    oom = False
+                    try:
+                        with make_ctx():
+                            big = torch.empty(
+                                alloc_size, dtype=torch.uint8, device=device
+                            )
+                            del big
+                    except torch.cuda.OutOfMemoryError:
+                        oom = True
 
-                self.assertFalse(
-                    oom,
-                    lambda msg: f"{msg}\n[{label}] OOM even though the default pool had "
-                    f"{fill_size // MB} MiB of freeable cached blocks "
-                    "-- release_cached_blocks was likely skipped",
-                )
+                    self.assertFalse(
+                        oom,
+                        lambda msg: f"{msg}\n[{label}] OOM even though the default pool had "
+                        f"{fill_size // MB} MiB of freeable cached blocks "
+                        "-- release_cached_blocks was likely skipped",
+                    )
+        finally:
+            torch.cuda.set_per_process_memory_fraction(orig_fraction, device)
 
     @serialTest()
     def test_mempool_block_free_not_deferred(self):
