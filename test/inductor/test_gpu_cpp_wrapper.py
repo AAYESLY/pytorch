@@ -1064,12 +1064,14 @@ if RUN_GPU:
         BaseTest("test_pointwise_hermite_polynomial_he"),
         BaseTest("test_pointwise_hermite_polynomial_h"),
         BaseTest(
-            "test_foreach_cpp_wrapper",
-            tests=test_foreach.ForeachTests(),
+            "test_foreach_cpp_wrapper_cuda",
+            device=None,
+            tests=test_foreach.ForeachTestsAccelerator(),
         ),  # test foreach
         BaseTest(
-            "test_enable_dynamic_shapes_cpp_wrapper",
-            tests=test_foreach.ForeachTests(),
+            "test_enable_dynamic_shapes_cpp_wrapper_cuda",
+            device=None,
+            tests=test_foreach.ForeachTestsAccelerator(),
         ),
         BaseTest(
             "test_dynamic_shapes_persistent_reduction_mixed_x_dim",
