@@ -5,6 +5,7 @@ import os
 import re
 import unittest
 import unittest.mock as mock
+import warnings
 from unittest.mock import patch
 
 import torch
@@ -2782,6 +2783,20 @@ Detected recompile when torch.compile stance is 'fail_on_recompile'. filename: '
         # invoked again and the first-compile annotation sticks.
         callee(torch.randn(4))
         self.assertEqual(annotations, [])
+
+    def test_untraceable_builtin_recommends_nonstrict_trace(self):
+        def forward(x):
+            return x + os.getpid()
+
+        compiled = torch.compile(forward, fullgraph=True, backend="eager")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with self.assertRaises(Unsupported) as cm:
+                compiled(torch.ones(()))
+
+        msg = str(cm.exception)
+        self.assertIn("torch.compiler.nonstrict_trace", msg)
+        self.assertNotIn("torch.compiler.allow_in_graph", msg)
 
 
 instantiate_parametrized_tests(DecoratorTests)
