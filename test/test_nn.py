@@ -14207,16 +14207,6 @@ if __name__ == '__main__':
     @parametrize_test("bias", [False, True])
     @dtypes(torch.float32)
     def test_linear_cross_entropy_loss_default(self, device, dtype, bias):
-        if (
-            TEST_WITH_ROCM
-            and getRocmVersion() >= (7, 14)
-            and not bias
-            and dtype == torch.float32
-        ):
-            self.skipTest(
-                "input-grad ULP worst case exceeds tolerance on ROCm 7.14+ "
-                "(bias=False, float32)"
-            )
         self._test_linear_cross_entropy_loss(device=device, dtype=dtype, bias=bias)
 
     @parametrize_test("prob_target", [False, True])
