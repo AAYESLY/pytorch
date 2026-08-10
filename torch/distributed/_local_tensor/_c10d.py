@@ -362,9 +362,10 @@ def _local_broadcast_(
 def _reduce_op_and_factor(
     reduce_op_so: ScriptObject,
 ) -> tuple[int, float | torch.Tensor | None]:
-    op = reduce_op_so.op()  # type: ignore[attr-defined]
+    reduce_op = ReduceOp.unbox(reduce_op_so)
+    op = int(reduce_op.op)
     if op == ReduceOp.PREMUL_SUM:
-        factor = reduce_op_so.factor()  # type: ignore[attr-defined]
+        factor = reduce_op.factor
         if isinstance(factor, torch.Tensor) and factor.numel() == 1:
             factor = factor.item()
         return op, factor
