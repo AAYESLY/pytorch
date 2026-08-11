@@ -1263,7 +1263,9 @@ class ReductionInvariantIndexingTests(InductorTestCase):
         )
         with config.patch(
             {
+                "debug_index_asserts": True,
                 "force_disable_caches": True,
+                "runtime_triton_nan_asserts": False,
                 "triton.persistent_reductions": persistent_reductions,
             }
         ):
@@ -1276,6 +1278,10 @@ class ReductionInvariantIndexingTests(InductorTestCase):
         kernel = kernels[0]
         narrow_load = r"tl\.load\([^\n]*\[XBLOCK, 1\]"
         FileCheck().check_regex(narrow_load).check_regex(narrow_load).run(kernel)
+        narrow_bounds_check = r"tl\.device_assert\([^\n]*\[XBLOCK, 1\]"
+        FileCheck().check_regex(narrow_bounds_check).check_regex(
+            narrow_bounds_check
+        ).run(kernel)
         if persistent_reductions:
             FileCheck().check("@triton_heuristics.persistent_reduction").check_not(
                 "for r0_offset in tl.range"
@@ -1284,6 +1290,37 @@ class ReductionInvariantIndexingTests(InductorTestCase):
             FileCheck().check_not("@triton_heuristics.persistent_reduction").check(
                 "for r0_offset in tl.range"
             ).run(kernel)
+
+    @unittest.skipIf(not HAS_CUDA_AND_TRITON, "requires CUDA and Triton")
+    @parametrize("persistent_reductions", [False, True])
+    def test_reduction_invariant_masked_index_expr(self, persistent_reductions):
+        def fn(value):
+            positions = torch.arange(
+                value.shape[0], device=value.device, dtype=torch.int64
+            )
+            positions = positions[:, None, None].expand(-1, 2, value.shape[-1])
+            values = torch.cat((positions, value), dim=1)
+            return values.sum(dim=-1)
+
+        value = torch.randint(0, 10, (16, 3, 64), device=GPU_TYPE, dtype=torch.int64)
+        with config.patch(
+            {
+                "force_disable_caches": True,
+                "triton.persistent_reductions": persistent_reductions,
+            }
+        ):
+            actual, kernels = run_and_get_kernels(
+                torch.compile(fn, fullgraph=True), value, remove_quote=True
+            )
+
+        self.assertEqual(fn(value), actual)
+        self.assertEqual(1, len(kernels))
+        kernel = kernels[0]
+        FileCheck().check_regex(r"tl\.broadcast_to\(x\d+, \[XBLOCK, 1\]\)").run(kernel)
+        if persistent_reductions:
+            FileCheck().check("@triton_heuristics.persistent_reduction").run(kernel)
+        else:
+            FileCheck().check("for r0_offset in tl.range").run(kernel)
 
     @unittest.skipIf(not HAS_CUDA_AND_TRITON, "requires CUDA and Triton")
     @parametrize("row_dtype", [torch.float32, torch.bfloat16, torch.bool])
