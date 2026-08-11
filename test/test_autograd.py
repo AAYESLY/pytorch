@@ -58,7 +58,6 @@ from torch.testing._internal.common_device_type import (
     expectedFailureMPS,
     instantiate_device_type_tests,
     onlyAccelerator,
-    onlyCUDA,
     skipMeta,
 )
 from torch.testing._internal.common_dtype import floating_types_and
@@ -13983,7 +13982,6 @@ class TestAutogradDeviceType(TestCase):
                     f()
 
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_advanced_indexing_backwards_large(self, device):
         # See https://github.com/pytorch/pytorch/issues/22843
         n = 1 << 16
@@ -14042,7 +14040,6 @@ class TestAutogradDeviceType(TestCase):
         self.assertIsNone(t3.grad)
 
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_reentrant_parent_error_on_cpu(self, device):
         def _get_cuda_memory_usage():
             # we don't need CUDA synchronize because the statistics are not tracked at
@@ -14105,7 +14102,6 @@ class TestAutogradDeviceType(TestCase):
         gradgradcheck(where_scalar_second, (cond, x))
 
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_free_unneeded_tensor(self, device):
         x = torch.randn(2, 3, 10, 10, device=device, requires_grad=True)
         m = torch.randn(1, 3, 1, 1, device=device)
@@ -14121,7 +14117,6 @@ class TestAutogradDeviceType(TestCase):
         self.assertEqual(base_mem, end_mem)
 
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_pin_memory(self, device):
         x = torch.randn(2, 2, dtype=torch.double, requires_grad=True)
         self.assertEqual(x, x.pin_memory())
@@ -14130,19 +14125,7 @@ class TestAutogradDeviceType(TestCase):
         gradcheck(lambda x: x.pin_memory(), [x])
         gradgradcheck(lambda x: x.pin_memory(), [x])
 
-    @onlyCUDA
-    def test_profiler_emit_nvtx(self, device):
-        # This test is not intended to ensure correctness of nvtx ranges.
-        # That would require something a great deal more complex (you'd have to create a
-        # profile in a subprocess, open it, and parse the sql somehow).
-        # This test is merely intended to catch if emit_nvtx breaks on construction.
-        a = torch.tensor([1, 2, 3], dtype=torch.float32, device=device)
-        with torch.cuda.profiler.profile():
-            with emit_nvtx():
-                a.add(1.0)
-
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_rnn_backward_to_input_but_not_parameters(self, device):
         # this checks whether it is possible to not require
         # weight parameters, but require inputs, see #7722
@@ -14287,7 +14270,6 @@ class TestAutogradDeviceType(TestCase):
             self.assertTrue(fwAD.unpack_dual(non_dual).tangent is not tangent)
 
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_simple_reentrant_cross_device(self, device):
         class ReentrantFunc(Function):
             _cpu_mode = True
@@ -14327,7 +14309,6 @@ class TestAutogradDeviceType(TestCase):
         out.sum().backward()
 
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_cross_device_reentrant_autograd(self, device):
         # Output on gpu so that this task will be associated with the gpu thread
         def fn_on_gpu(inp):
@@ -14595,7 +14576,6 @@ class TestAutogradDeviceType(TestCase):
         gradgradcheck(fn, (vec))
 
     @onlyAccelerator
-    @skipIfMPS  # the test doesn't work on MPS
     def test_gradcheck_input_output_different_device(self, device):
         x = torch.ones((1,), dtype=torch.double, device=device, requires_grad=True)
         gradcheck(lambda x: x.to("cpu"), (x,))
@@ -15890,111 +15870,6 @@ class TestAutogradStreamSynchronization(TestCase):
         # Run an extra time to warm up
         for _ in range(2):
             test()
-
-    # This test may spuriously fail on non-cuda accelerators (since we won't
-    # be calling sleep)
-    @onlyCUDA
-    @skipCUDANonDefaultStreamIf(True)
-    def test_side_stream_backward_overlap(self, device):
-        # In case 2/3, we would designate the consumer as the accumulation
-        # stream and naively, one might have the consumer wait for the producer
-        # as soon as we've added to the InputBuffer the first time.
-        #
-        # However, in the case where the stream of the consumer also happens to
-        # be the stream of the producer, this is suboptimal because it would
-        # prevent the computation of the two producers from being overlapped.
-        # what you really want to do is to have that sync between the producer
-        # and consumer to be delayed until right before the accumulation.
-        # Note that this doesn't address N=3, but the side-stream N=2 case is
-        # the common case.
-        events = {
-            "main_backward_start": None,
-            "side_backward_start": None,
-            "side_backward_end": None,
-        }
-
-        class Main(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, x):
-                return x
-
-            @staticmethod
-            def backward(ctx, gO):
-                # Record when main backward starts
-                evt = torch.Event(enable_timing=True)
-                evt.record()
-                events["main_backward_start"] = evt
-                return gO
-
-        class Side(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, x):
-                return x
-
-            @staticmethod
-            def backward(ctx, gO):
-                evt = torch.Event(enable_timing=True)
-                evt.record()
-                events["side_backward_start"] = evt
-
-                _sleep_if_cuda(NUM_GPU_CYCLES_IN_ONE_SEC // 2)
-                result = gO.clone()
-
-                evt = torch.Event(enable_timing=True)
-                evt.record()
-                events["side_backward_end"] = evt
-                return result
-
-        def populate_events():
-            self.synchronize_all_devices()
-            self.assert_all_streams_default()
-
-            (default_stream_0,) = self.get_default_streams()
-
-            a = torch.ones(256, 256, requires_grad=True, device=_get_device_name(0))
-            b = a.clone()  # not a leaf, does it matter?
-
-            evt = torch.Event()
-            evt.record()
-
-            # Overlap during forward
-            c_main = Main.apply(b)
-
-            with torch.Stream(0) as s0:
-                s0.wait_event(evt)
-                c_side = Side.apply(b)
-
-            default_stream_0.wait_stream(s0)
-
-            with torch.autograd.grad_mode.set_multithreading_enabled(False):
-                (c_main + c_side).sum().backward()
-
-            self.synchronize_all_devices()
-
-        def check_ordering():
-            # Sanity check: side backward's end happens after start
-            self.assertTrue(
-                events["side_backward_start"].elapsed_time(events["side_backward_end"])
-                > 0
-            )
-            # Overlap check: side's backward starts before side backward ends
-            self.assertTrue(
-                events["main_backward_start"].elapsed_time(events["side_backward_end"])
-                > 0
-            )
-
-        # Warmup
-        for _ in range(2):
-            populate_events()
-
-        # Reset events (not really necessary but OK)
-        events["side_backward_start"] = None
-        events["side_backward_end"] = None
-        events["main_backward_start"] = None
-
-        # Test
-        populate_events()
-        check_ordering()
 
     @expectedFailureMPS
     def test_warn_on_accumulate_grad_stream_mismatch_flag(self, device):
@@ -18310,6 +18185,147 @@ class TestFunctionAssertMessages(TestCase):
             F.apply(torch.randn(2, requires_grad=True))
 
 
+class TestAutogradCUDA(TestCase):
+    hw_classification = HardwareClassification.CUDA
+
+    def get_default_streams(self, num_devices=1):
+        out = []
+        for i in range(num_devices):
+            with _set_device_index(i):
+                acc = torch.accelerator.current_accelerator()
+                out.append(torch.get_device_module(acc).default_stream())
+        return tuple(out)
+
+    def synchronize_all_devices(self, num_devices=1):
+        for i in range(num_devices):
+            torch.accelerator.synchronize(i)
+
+    def assert_all_streams_default(self, num_devices=1):
+        # Sanity check
+        default_streams = self.get_default_streams(num_devices)
+        for i in range(num_devices):
+            with _set_device_index(i):
+                acc = torch.accelerator.current_accelerator()
+                # Do this instead of using torch.accelerator.current_stream(i)
+                # Otherwise, e.g. in the case of cuda, we'd be trying to compare
+                # torch.cuda.Stream with torch.Stream
+                self.assertEqual(
+                    torch.get_device_module(acc).current_stream(), default_streams[i]
+                )
+
+    def test_profiler_emit_nvtx(self, device):
+        # This test is not intended to ensure correctness of nvtx ranges.
+        # That would require something a great deal more complex (you'd have to create a
+        # profile in a subprocess, open it, and parse the sql somehow).
+        # This test is merely intended to catch if emit_nvtx breaks on construction.
+        a = torch.tensor([1, 2, 3], dtype=torch.float32, device=device)
+        with torch.cuda.profiler.profile():
+            with emit_nvtx():
+                a.add(1.0)
+
+    @skipCUDANonDefaultStreamIf(True)
+    def test_side_stream_backward_overlap(self, device):
+        # In case 2/3, we would designate the consumer as the accumulation
+        # stream and naively, one might have the consumer wait for the producer
+        # as soon as we've added to the InputBuffer the first time.
+        #
+        # However, in the case where the stream of the consumer also happens to
+        # be the stream of the producer, this is suboptimal because it would
+        # prevent the computation of the two producers from being overlapped.
+        # what you really want to do is to have that sync between the producer
+        # and consumer to be delayed until right before the accumulation.
+        # Note that this doesn't address N=3, but the side-stream N=2 case is
+        # the common case.
+        events = {
+            "main_backward_start": None,
+            "side_backward_start": None,
+            "side_backward_end": None,
+        }
+
+        class Main(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x
+
+            @staticmethod
+            def backward(ctx, gO):
+                # Record when main backward starts
+                evt = torch.Event(enable_timing=True)
+                evt.record()
+                events["main_backward_start"] = evt
+                return gO
+
+        class Side(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x
+
+            @staticmethod
+            def backward(ctx, gO):
+                evt = torch.Event(enable_timing=True)
+                evt.record()
+                events["side_backward_start"] = evt
+
+                _sleep_if_cuda(NUM_GPU_CYCLES_IN_ONE_SEC // 2)
+                result = gO.clone()
+
+                evt = torch.Event(enable_timing=True)
+                evt.record()
+                events["side_backward_end"] = evt
+                return result
+
+        def populate_events():
+            self.synchronize_all_devices()
+            self.assert_all_streams_default()
+
+            (default_stream_0,) = self.get_default_streams()
+
+            a = torch.ones(256, 256, requires_grad=True, device=_get_device_name(0))
+            b = a.clone()  # not a leaf, does it matter?
+
+            evt = torch.Event()
+            evt.record()
+
+            # Overlap during forward
+            c_main = Main.apply(b)
+
+            with torch.Stream(0) as s0:
+                s0.wait_event(evt)
+                c_side = Side.apply(b)
+
+            default_stream_0.wait_stream(s0)
+
+            with torch.autograd.grad_mode.set_multithreading_enabled(False):
+                (c_main + c_side).sum().backward()
+
+            self.synchronize_all_devices()
+
+        def check_ordering():
+            # Sanity check: side backward's end happens after start
+            self.assertTrue(
+                events["side_backward_start"].elapsed_time(events["side_backward_end"])
+                > 0
+            )
+            # Overlap check: side's backward starts before side backward ends
+            self.assertTrue(
+                events["main_backward_start"].elapsed_time(events["side_backward_end"])
+                > 0
+            )
+
+        # Warmup
+        for _ in range(2):
+            populate_events()
+
+        # Reset events (not really necessary but OK)
+        events["side_backward_start"] = None
+        events["side_backward_end"] = None
+        events["main_backward_start"] = None
+
+        # Test
+        populate_events()
+        check_ordering()
+
+
 # Import test cases from below autograd/ here. These are found
 # implicitly by the loader, so Flake8 thinks they are unused, hence
 # the suppressions.
@@ -18328,6 +18344,7 @@ instantiate_device_type_tests(
 instantiate_device_type_tests(
     TestAutogradStreamSynchronization, globals(), except_for=None
 )
+instantiate_device_type_tests(TestAutogradCUDA, globals(), only_for="cuda")
 
 instantiate_parametrized_tests(TestAutograd)
 instantiate_parametrized_tests(TestNestedCheckpoint)
