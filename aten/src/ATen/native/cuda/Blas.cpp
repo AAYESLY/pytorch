@@ -390,7 +390,16 @@ bool launchTunableGemmAndBias(cublasCommonArgs &args, const Scalar& alpha, const
       // persisted at compile-time tuning.
       result = mgr.LookupWildcardFallback(op_sig, concrete_sig);
       if (result == at::cuda::tunable::ResultEntry::Null()) {
-        return false;  // total miss: caller re-dispatches the non-tunable path
+        // Total miss: record the untuned shape (operator() would do this, but
+        // we never reach it) before the caller re-dispatches the non-tunable path.
+        if (tuning_ctx->IsRecordUntunedEnabled()) {
+          mgr.RecordUntuned(
+              tuning_ctx->GetUntunedFile(),
+              op_sig,
+              concrete_sig,
+              params.BLASSignature());
+        }
+        return false;
       }
     }
     // Pass the already-computed concrete_sig so operator() does not recompute
