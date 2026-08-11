@@ -137,6 +137,56 @@ static rocblas_operation _rocblasOpFromChar(char op) {
 }
 
 template <typename T>
+bool IsRocblasSolutionSupported(
+    const GemmParams<T>* params,
+    rocblas_int solution) {
+  auto handle = (rocblas_handle)at::cuda::getCurrentCUDABlasHandle();
+  const auto input_output_type = RocBlasDataTypeFor<T>();
+  const auto compute_type = RocBlasComputeTypeFor<T>();
+  const auto alpha = DoCastForHalfOrBfloat16(params->alpha);
+  const auto beta = DoCastForHalfOrBfloat16(params->beta);
+  rocblas_int solution_count = 0;
+  auto get_solutions = [&](rocblas_int* solutions, rocblas_int* count) {
+    return rocblas_gemm_ex_get_solutions(
+        handle,
+        _rocblasOpFromChar(params->transa),
+        _rocblasOpFromChar(params->transb),
+        params->m,
+        params->n,
+        params->k,
+        &alpha,
+        params->a,
+        input_output_type,
+        params->lda,
+        params->b,
+        input_output_type,
+        params->ldb,
+        &beta,
+        params->c,
+        input_output_type,
+        params->ldc,
+        params->c,
+        input_output_type,
+        params->ldc,
+        compute_type,
+        rocblas_gemm_algo_solution_index,
+        rocblas_gemm_flags_none,
+        solutions,
+        count);
+  };
+  auto status = get_solutions(nullptr, &solution_count);
+  if (status != rocblas_status_success || solution_count == 0) {
+    return false;
+  }
+  const auto solution_capacity = solution_count;
+  std::vector<rocblas_int> solutions(solution_capacity);
+  status = get_solutions(solutions.data(), &solution_count);
+  solutions.resize(std::min(solution_count, solution_capacity));
+  const auto found = std::find(solutions.begin(), solutions.end(), solution);
+  return status == rocblas_status_success && found != solutions.end();
+}
+
+template <typename T>
 class RocblasGemmOp : public Callable<GemmParams<T>> {
   public:
     RocblasGemmOp(int32_t solution) : solution_{solution} {}
@@ -145,6 +195,10 @@ class RocblasGemmOp : public Callable<GemmParams<T>> {
       auto input_output_type = RocBlasDataTypeFor<T>();
       if (at::globalContext().float32Precision(at::Float32Backend::CUDA, at::Float32Op::MATMUL) == at::Float32Precision::TF32 && input_output_type == rocblas_datatype_f32_r)
         return FAIL;  // no support for TF32 in rocBLAS
+      if (params->validate_solution &&
+          !IsRocblasSolutionSupported(params, solution_)) {
+        return UNSUPPORTED;
+      }
       auto compute_type = RocBlasComputeTypeFor<T>();
       auto h_a = DoCastForHalfOrBfloat16(params->alpha);
       auto h_b = DoCastForHalfOrBfloat16(params->beta);
@@ -210,6 +264,61 @@ auto GetRocBlasGemmTypeStringAndOps() {
 }
 
 template <typename T>
+bool IsRocblasSolutionSupported(
+    const GemmStridedBatchedParams<T>* params,
+    rocblas_int solution) {
+  auto handle = (rocblas_handle)at::cuda::getCurrentCUDABlasHandle();
+  const auto input_output_type = RocBlasDataTypeFor<T>();
+  const auto compute_type = RocBlasComputeTypeFor<T>();
+  const auto alpha = DoCastForHalfOrBfloat16(params->alpha);
+  const auto beta = DoCastForHalfOrBfloat16(params->beta);
+  rocblas_int solution_count = 0;
+  auto get_solutions = [&](rocblas_int* solutions, rocblas_int* count) {
+    return rocblas_gemm_strided_batched_ex_get_solutions(
+        handle,
+        _rocblasOpFromChar(params->transa),
+        _rocblasOpFromChar(params->transb),
+        params->m,
+        params->n,
+        params->k,
+        &alpha,
+        params->a,
+        input_output_type,
+        params->lda,
+        params->stride_a,
+        params->b,
+        input_output_type,
+        params->ldb,
+        params->stride_b,
+        &beta,
+        params->c,
+        input_output_type,
+        params->ldc,
+        params->stride_c,
+        params->c,
+        input_output_type,
+        params->ldc,
+        params->stride_c,
+        params->batch,
+        compute_type,
+        rocblas_gemm_algo_solution_index,
+        rocblas_gemm_flags_none,
+        solutions,
+        count);
+  };
+  auto status = get_solutions(nullptr, &solution_count);
+  if (status != rocblas_status_success || solution_count == 0) {
+    return false;
+  }
+  const auto solution_capacity = solution_count;
+  std::vector<rocblas_int> solutions(solution_capacity);
+  status = get_solutions(solutions.data(), &solution_count);
+  solutions.resize(std::min(solution_count, solution_capacity));
+  const auto found = std::find(solutions.begin(), solutions.end(), solution);
+  return status == rocblas_status_success && found != solutions.end();
+}
+
+template <typename T>
 class RocblasGemmStridedBatchedOp : public Callable<GemmStridedBatchedParams<T>> {
   public:
     RocblasGemmStridedBatchedOp(int32_t solution) : solution_{solution} {}
@@ -218,6 +327,10 @@ class RocblasGemmStridedBatchedOp : public Callable<GemmStridedBatchedParams<T>>
       auto input_output_type = RocBlasDataTypeFor<T>();
       if (at::globalContext().float32Precision(at::Float32Backend::CUDA, at::Float32Op::MATMUL) == at::Float32Precision::TF32 && input_output_type == rocblas_datatype_f32_r)
         return FAIL;  // no support for TF32 in rocBLAS
+      if (params->validate_solution &&
+          !IsRocblasSolutionSupported(params, solution_)) {
+        return UNSUPPORTED;
+      }
       auto compute_type = RocBlasComputeTypeFor<T>();
       auto h_a = DoCastForHalfOrBfloat16(params->alpha);
       auto h_b = DoCastForHalfOrBfloat16(params->beta);

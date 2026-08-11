@@ -506,6 +506,11 @@ struct OpParams {
   // legacy concrete-only behavior for callers that don't push a guard.
   DynamicDimsMask dynamic_dims_mask{};
 
+  // Wildcard dispatch may reuse a backend solution with a new concrete shape.
+  // Backends without an unconditional compatibility check use this to request
+  // validation before launching the kernel.
+  bool validate_solution{false};
+
   bool IsDynamicM() const { return dynamic_dims_mask.m(); }
   bool IsDynamicN() const { return dynamic_dims_mask.n(); }
   bool IsDynamicK() const { return dynamic_dims_mask.k(); }

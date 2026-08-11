@@ -76,6 +76,7 @@ import logging
 import os
 import tempfile
 import unittest
+import warnings
 from collections.abc import Callable
 from typing import cast, TypeAlias
 
@@ -325,6 +326,48 @@ def _untuned_has(lines: list[str], op_substr: str, m: int, n: int, k: int) -> bo
         if all(f"_{d}_" in padded for d in (m, n, k)):
             return True
     return False
+
+
+def _run_without_tunable_fallback_warning(
+    test: TestCase, op: Callable[[], torch.Tensor]
+) -> torch.Tensor:
+    """Run `op` and assert it does NOT emit the TunableOp "falling back to
+    the non-tunable kernel" warning, i.e. the wildcard-selected backend
+    solution was accepted for the new concrete shape.
+
+    Coverage note: this only exercises the accepted side of the backend
+    compatibility check (GemmRocblas.h::IsRocblasSolutionSupported and
+    HipblasltGemmOp's matmulIsAlgoSupported). The rejected side (kernel
+    returns a non-OK status -> warn, record untuned, fall back) is not
+    asserted here because it cannot be triggered deterministically from
+    Python:
+
+      - The rocBLAS solution-list pre-check only runs on the rocBLAS
+        backend, but on gfx94x/gfx95x the fastest tuned op is usually a
+        hipBLASLt algo, and which backend a wildcard entry carries is not
+        controllable from the test.
+      - A wildcard entry only matches concrete shapes that differ in the
+        dynamic dim(s) (e.g. M). Varying a non-dynamic dim or the transpose
+        layout misses the wildcard entirely and takes the both-miss aten
+        fallback (covered by the *_both_miss_* tests), not the rejection
+        path. Varying only the dynamic dim is exactly the case backends are
+        expected to accept, so a rejection there would depend on internal,
+        version-specific rocBLAS solution metadata we cannot force.
+
+    Deterministic coverage of the rejection branch would need a C++ unit
+    test calling IsRocblasSolutionSupported with a known-invalid solution
+    index against a live rocBLAS handle.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = op()
+    fallback_warnings = [
+        warning
+        for warning in caught
+        if "falling back to the non-tunable kernel" in str(warning.message)
+    ]
+    test.assertEqual(fallback_warnings, [])
+    return out
 
 
 class DynamicTunableOpsTest(TestCase):
@@ -600,7 +643,9 @@ class DynamicTunableOpsTest(TestCase):
         # the wildcard seeded in Phase A and dispatches via it.
         torch.cuda.tunable.enable(True)
         torch.cuda.tunable.tuning_enable(False)
-        out = torch.addmm(bias_x, mat1_x, mat2_x)
+        out = _run_without_tunable_fallback_warning(
+            self, lambda: torch.addmm(bias_x, mat1_x, mat2_x)
+        )
 
         self.assertFalse(
             _has_concrete_entry("GemmAndBiasTunableOp", m_test, n, k),
@@ -699,7 +744,9 @@ class DynamicTunableOpsTest(TestCase):
         # Runtime: tunable enabled, tuning disabled, no mask.
         torch.cuda.tunable.enable(True)
         torch.cuda.tunable.tuning_enable(False)
-        out = torch.mm(mat1_x, mat2_x)
+        out = _run_without_tunable_fallback_warning(
+            self, lambda: torch.mm(mat1_x, mat2_x)
+        )
 
         self.assertFalse(
             _has_concrete_entry("GemmTunableOp", m_test, n, k),
@@ -748,7 +795,7 @@ class DynamicTunableOpsTest(TestCase):
         # Runtime: tunable enabled, tuning disabled, no mask.
         torch.cuda.tunable.enable(True)
         torch.cuda.tunable.tuning_enable(False)
-        out = torch.bmm(b1_x, b2_x)
+        out = _run_without_tunable_fallback_warning(self, lambda: torch.bmm(b1_x, b2_x))
 
         self.assertFalse(
             _has_concrete_entry("GemmStridedBatchedTunableOp", m_test, n, k),
@@ -903,7 +950,9 @@ class DynamicTunableOpsTest(TestCase):
 
         torch.cuda.tunable.enable(True)
         torch.cuda.tunable.tuning_enable(False)
-        out = torch.baddbmm(bias_x, b1_x, b2_x)
+        out = _run_without_tunable_fallback_warning(
+            self, lambda: torch.baddbmm(bias_x, b1_x, b2_x)
+        )
 
         self.assertEqual(
             out,
@@ -1518,10 +1567,12 @@ class ScaledGemmTunableOpFP8Test(TestCase):
         )
 
         # Phase C: runtime, no mask, different M -> wildcard fallback
-        # (or aten fallback) must produce correct output.
+        # and pass backend compatibility validation.
         torch.cuda.tunable.enable(True)
         torch.cuda.tunable.tuning_enable(False)
-        out = self._run_scaled_mm(a_x, b_x, sa_x, sb_x)
+        out = _run_without_tunable_fallback_warning(
+            self, lambda: self._run_scaled_mm(a_x, b_x, sa_x, sb_x)
+        )
 
         self.assertEqual(
             out,
@@ -1529,8 +1580,7 @@ class ScaledGemmTunableOpFP8Test(TestCase):
             atol=5e-2,
             rtol=5e-2,
             msg="ScaledGemmTunableOp dispatch output should match "
-            "tunable-disabled reference (either via wildcard fallback "
-            "or via non-tunable aten fallback)",
+            "tunable-disabled reference via wildcard fallback",
         )
 
     def test_scaled_gemm_both_miss_falls_back_safely(self) -> None:

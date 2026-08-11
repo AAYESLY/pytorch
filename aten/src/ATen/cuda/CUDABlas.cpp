@@ -875,10 +875,25 @@ inline bool bgemm_tunable(CUDABLAS_BGEMM_ARGTYPES_AND_C_DTYPE(Dtype, C_Dtype)) {
         }
         return false;
       }
+      params.validate_solution = true;
     }
     // Pass the already-computed concrete_sig so operator() does not recompute
     // params.Signature() on the dispatch fast path.
-    bgemm_op(&params, concrete_sig);
+    const auto status = bgemm_op(&params, concrete_sig);
+    if (status != at::cuda::tunable::OK) {
+      TORCH_WARN_ONCE(
+          "TunableOp batched GEMM kernel returned status ",
+          status,
+          "; falling back to the non-tunable kernel");
+      if (tuning_ctx->IsRecordUntunedEnabled()) {
+        mgr.RecordUntuned(
+            tuning_ctx->GetUntunedFile(),
+            op_sig,
+            concrete_sig,
+            params.BLASSignature());
+      }
+      return false;
+    }
     return true;
   };
 
@@ -1455,10 +1470,25 @@ inline bool gemm_tunable(CUDABLAS_GEMM_ARGTYPES_AND_C_DTYPE(DType, C_Dtype)) {
         }
         return false;
       }
+      params.validate_solution = true;
     }
     // Pass the already-computed concrete_sig so operator() does not recompute
     // params.Signature() on the dispatch fast path.
-    gemm_op(&params, concrete_sig);
+    const auto status = gemm_op(&params, concrete_sig);
+    if (status != at::cuda::tunable::OK) {
+      TORCH_WARN_ONCE(
+          "TunableOp GEMM kernel returned status ",
+          status,
+          "; falling back to the non-tunable kernel");
+      if (tuning_ctx->IsRecordUntunedEnabled()) {
+        mgr.RecordUntuned(
+            tuning_ctx->GetUntunedFile(),
+            op_sig,
+            concrete_sig,
+            params.BLASSignature());
+      }
+      return false;
+    }
     return true;
   };
 
