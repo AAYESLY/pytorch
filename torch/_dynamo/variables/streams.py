@@ -18,7 +18,7 @@ from ..graph_bytecode_inputs import (
     reset_user_object_tracking,
 )
 from ..source import CurrentStreamSource
-from .base import GetSet, Method, VariableTracker
+from .base import GetSet, Method, readonly_setter, VariableTracker
 from .constant import ConstantVariable
 from .ctx_manager import FxTracebackAnnotateVariable
 from .lazy import LazyVariableTracker
@@ -177,12 +177,17 @@ has_side_effect(torch.ops.streams.synchronize_event.default)
 
 
 @custom_op("streams::synchronize_device", mutates_args=())
-def synchronize_device(device_type: str, device_index: int) -> None:
-    torch.accelerator.synchronize(torch.device(device_type, device_index))
+def synchronize_device(device_type: str, device_index: int | None) -> None:
+    device = (
+        torch.device(device_type)
+        if device_index is None
+        else torch.device(device_type, device_index)
+    )
+    torch.accelerator.synchronize(device)
 
 
 @synchronize_device.register_fake
-def _(device_type: str, device_index: int) -> None:
+def _(device_type: str, device_index: int | None) -> None:
     pass
 
 
@@ -270,10 +275,16 @@ class SymbolicStreamState:
 
         cur_stack: list[StreamVariable] = []
         if torch.accelerator.is_available():
+            from torch.fx.experimental.proxy_tensor import _coor_device_index_is_current
+
             # Reset the registry so the current stream is guaranteed index 0.
             reset_user_object_tracking()
             stream = torch.accelerator.current_stream()
-            source = CurrentStreamSource(stream.device)
+            device = stream.device
+            if _coor_device_index_is_current(device):
+                # Reconstruct the stream relative to each rank's current device.
+                device = torch.device(device.type)
+            source = CurrentStreamSource(device)
             # Register the current stream so it gets index 0 (registry is
             # fresh at tracing start).  The inductor wrapper updates this
             # entry at runtime so cudagraph capture uses the capture stream
@@ -307,6 +318,17 @@ class SymbolicStreamState:
                     return stream
 
         return self.cur_stream_stack[-1]
+
+    def tracked_device_type(self) -> str | None:
+        """Device type of the tracked current stream, or None if no stream is
+        tracked.  Peeks the value so LazyVariableTrackers on the stack are not
+        realized (same pattern as cur_stream_id)."""
+        if not self.cur_stream_stack:
+            return None
+        stream = self.cur_stream_stack[-1]
+        if isinstance(stream, LazyVariableTracker) and not stream.is_realized():
+            return stream.peek_value().device.type
+        return stream.value.device.type
 
     def in_stream_context(self) -> bool:
         return len(self.cur_stream_stack) > 0
@@ -615,7 +637,9 @@ class CudaStreamVariable(StreamVariable):
     _device_handle_attr = "cuda_stream"
 
     tp_getset = {
-        "cuda_stream": GetSet(StreamVariable._stream_device_handle_get, None),
+        "cuda_stream": GetSet(
+            StreamVariable._stream_device_handle_get, readonly_setter
+        ),
     }
 
 
@@ -626,7 +650,7 @@ class XpuStreamVariable(StreamVariable):
     _device_handle_attr = "sycl_queue"
 
     tp_getset = {
-        "sycl_queue": GetSet(StreamVariable._stream_device_handle_get, None),
+        "sycl_queue": GetSet(StreamVariable._stream_device_handle_get, readonly_setter),
     }
 
 
