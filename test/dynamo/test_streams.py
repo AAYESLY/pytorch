@@ -3723,6 +3723,129 @@ class TestPrivateUse1StreamHandler(torch._dynamo.test_case.TestCase):
         "Requires an accelerator with Stream/current_stream device APIs "
         "(skips on MPS) to populate cur_stream_stack in SymbolicStreamState",
     )
+    def test_untracked_device_index_breaks_on_single_device(self):
+        """
+        On a single-device machine, current_stream(1) queries an unavailable
+        device: the mint query fails (eager would raise too) and surfaces as
+        the structured bad-device-argument graph break - never the traced
+        device's stream.
+        """
+        device_type = torch.accelerator.current_accelerator().type
+        device_module = torch.get_device_module(device_type)
+        if device_module.device_count() >= 2:
+            self.skipTest("covered by the multi-device tests below")
+
+        def fn(x):
+            device_module.current_stream(1)
+            return x + 1
+
+        with self.assertRaises(torch._dynamo.exc.Unsupported) as ctx:
+            torch.compile(fn, backend="eager", fullgraph=True)(
+                torch.ones(2, device=device_type)
+            )
+        self.assertIn("bad device argument", str(ctx.exception))
+
+    @unittest.skipUnless(
+        _accelerator_has_stream_api(),
+        "Requires an accelerator with Stream/current_stream device APIs "
+        "(skips on MPS) to populate cur_stream_stack in SymbolicStreamState",
+    )
+    def test_untracked_device_index_returns_correct_stream(self):
+        """
+        current_stream(<untracked index>) mints a tracked stream for the
+        requested device instead of silently returning the traced device's
+        stream (the wrong device's stream). Compiled matches eager on
+        device_index and stream_id, and the same compiled artifact reflects
+        a runtime stream switch on device 1 without recompiling.
+        """
+        device_type = torch.accelerator.current_accelerator().type
+        device_module = torch.get_device_module(device_type)
+        if device_module.device_count() < 2:
+            self.skipTest("needs at least 2 devices")
+        torch.zeros(1, device=f"{device_type}:1")  # init device 1 default stream
+        x = torch.ones(2, device=device_type)
+
+        def fn(x):
+            return device_module.current_stream(1), x + 1
+
+        eager = fn(x)[0]
+        compiled_fn = torch.compile(fn, backend="eager", fullgraph=True)
+        r1 = compiled_fn(x)[0]
+        self.assertEqual(eager.device_index, 1)
+        self.assertEqual(r1.device_index, 1)
+        self.assertEqual(r1.stream_id, eager.stream_id)
+
+        import torch._dynamo.utils as dynamo_utils
+
+        graphs_before = dynamo_utils.counters["stats"]["unique_graphs"]
+        s1 = device_module.Stream(device=1)
+        with device_module.stream(s1):
+            r2 = compiled_fn(x)[0]
+        self.assertEqual(
+            r2.stream_id, s1.stream_id, "runtime stream switch not reflected"
+        )
+        self.assertEqual(
+            dynamo_utils.counters["stats"]["unique_graphs"],
+            graphs_before,
+            "runtime stream switch must not recompile",
+        )
+
+    @unittest.skipUnless(
+        _accelerator_has_stream_api(),
+        "Requires an accelerator with Stream/current_stream device APIs "
+        "(skips on MPS) to populate cur_stream_stack in SymbolicStreamState",
+    )
+    def test_untracked_device_index_in_graph_uses_minted_index(self):
+        """
+        In-graph uses of a minted stream (wait_stream on it, synchronize,
+        entering its stream context) must reference the minted stream's
+        index - never CURRENT_STREAM_INDEX, which is the traced device's
+        stream (the silent wrong-stream bug this PR fixes).
+        """
+        device_type = torch.accelerator.current_accelerator().type
+        device_module = torch.get_device_module(device_type)
+        if device_module.device_count() < 2:
+            self.skipTest("needs at least 2 devices")
+        torch.zeros(1, device=f"{device_type}:1")
+        x = torch.ones(2, device=device_type)
+
+        def fn(x):
+            minted = device_module.current_stream(1)
+            s = device_module.Stream()
+            s.wait_stream(minted)
+            minted.synchronize()
+            with device_module.stream(minted):
+                r = x + 1
+            return r
+
+        backend = torch._dynamo.testing.EagerAndRecordGraphs()
+        result = torch.compile(fn, backend=backend, fullgraph=True)(x)
+        self.assertEqual(result, x + 1)  # numerics match eager
+        graph = backend.graphs[0].graph
+        mint_sensitive_ops = {
+            torch.ops.streams.wait_stream.default,
+            torch.ops.streams.synchronize_stream.default,
+            torch.ops.streams.record_event.default,
+            torch.ops.streams.wait_event.default,
+        }
+        seen = []
+        for n in graph.nodes:
+            if n.op == "call_function" and n.target in mint_sensitive_ops:
+                seen.append(n)
+                for a in n.args:
+                    if isinstance(a, int):
+                        self.assertNotEqual(
+                            a,
+                            CURRENT_STREAM_INDEX,
+                            f"{n.target} must not use the traced device's stream",
+                        )
+        self.assertTrue(seen, "no stream ops found in the compiled graph")
+
+    @unittest.skipUnless(
+        _accelerator_has_stream_api(),
+        "Requires an accelerator with Stream/current_stream device APIs "
+        "(skips on MPS) to populate cur_stream_stack in SymbolicStreamState",
+    )
     def test_bad_device_arg_is_clean_graph_break(self):
         """
         A bogus device argument must surface as the structured "bad device

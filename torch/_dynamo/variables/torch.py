@@ -3081,6 +3081,51 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                         hints=[*graph_break_hints.SUPPORTABLE],
                     )
 
+                # An explicit device index with no matching tracked stream
+                # would silently fall back to the tracked (top) stream - the
+                # wrong device's stream. Mint a tracked stream for the
+                # requested device instead, the same way
+                # _maybe_emit_sync_dealloc mints allocation streams: register
+                # the live-queried stream (reconstruction is a runtime query
+                # of that device) and build the StreamVariable directly with
+                # the minted index - NOT via a builder/lazy path, which would
+                # collapse any CurrentStreamSource onto CURRENT_STREAM_INDEX.
+                # A failing query (e.g. an unavailable device, which eager
+                # would also reject) falls through to the bad-device-argument
+                # break below.
+                if (
+                    device is not None
+                    and device.index is not None
+                    and not tx.symbolic_stream_state.has_tracked_stream_for(device)
+                ):
+                    from ..graph_bytecode_inputs import get_external_object_by_index
+                    from ..source import CurrentStreamSource
+                    from ..utils import set_example_value
+                    from .streams import StreamVariable
+                    from .streams import get_current_stream as register_minted_stream
+
+                    minted_index = register_minted_stream(device)
+                    minted = get_external_object_by_index(minted_index)
+                    if not isinstance(minted, torch.Stream):
+                        raise AssertionError(
+                            f"expected a torch.Stream for {device}, got {type(minted)}"
+                        )
+                    minted_proxy = tx.output.create_proxy(
+                        "call_function",
+                        get_external_object_by_index,
+                        (minted_index,),
+                        {},
+                    )
+                    set_example_value(minted_proxy.node, minted)
+                    stream_variable_cls = _get_stream_variable_cls(self.value)
+                    if stream_variable_cls is None:
+                        stream_variable_cls = StreamVariable
+                    return stream_variable_cls(
+                        minted_proxy,
+                        minted,
+                        minted_index,
+                        source=CurrentStreamSource(device),
+                    )
                 stream_var = tx.symbolic_stream_state.cur_stream(device)
                 stream_variable_cls = _get_stream_variable_cls(self.value)
                 if stream_variable_cls is not None and not isinstance(
